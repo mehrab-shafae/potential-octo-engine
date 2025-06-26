@@ -3,11 +3,10 @@
 #include <string>
 #include <vector>
 
-const double PRICE_BUTTER = 1.00;
-const double PRICE_MILK   = 3.00;
-const double PRICE_EGGS   = 6.95;
+// const double PRICE_BUTTER = 1.00;
+// const double PRICE_MILK   = 3.00;
+// const double PRICE_EGGS   = 6.95;
 
-// متد کمکی برای نمایش آرگومان‌ها
 void print_args (const int argc, const char* const argv[])
 {
     std::cout << "[Aspire] Command-line arguments (argc = " << argc << "):\n";
@@ -17,7 +16,6 @@ void print_args (const int argc, const char* const argv[])
     }
 }
 
-// متد دیباگ برای نمایش پیام
 void debug_log (const std::string& msg)
 {
     std::cerr << "[Aspire][DEBUG] " << msg << std::endl;
