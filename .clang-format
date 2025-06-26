@@ -1,0 +1,11 @@
+BasedOnStyle: Google
+IndentWidth: 6
+TabWidth: 6
+UseTab: Never
+ColumnLimit: 300
+AllowShortFunctionsOnASingleLine: Empty
+BreakBeforeBraces: Attach
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceBeforeParens: ControlStatements
+AlwaysBreakAfterReturnType: None
