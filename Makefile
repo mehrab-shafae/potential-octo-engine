@@ -7,7 +7,7 @@ TARGET = $(BIN_DIR)/aspire
 all: merge
 
 merge: $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -flto=auto -std=c++20 -march=native -mtune=generic -static -s $(SRC_DIR)/main.cpp -o $(TARGET)
+	$(CXX) $(CXXFLAGS) -flto=auto -std=c++20 -march=native -mtune=generic -pthread -static -s $(SRC_DIR)/main.cpp -o $(TARGET)
 	./pretty.sh
 
 $(BIN_DIR):
