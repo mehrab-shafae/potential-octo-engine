@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <iostream>
+#include <sys/epoll.h>
 
 // --- ماکروهای لاگ برای راحتی و خوانایی ---
 #define LOG_INFO(msg) std::cout << "[INFO] " << msg << std::endl
@@ -12,6 +13,7 @@
 constexpr int PORT = 8080;                // پورت سرور
 constexpr int BACKLOG = 5;                // تعداد کلاینت‌هایی که در صف انتظار می‌مانند
 constexpr int BUFFER_SIZE = 3000;         // اندازه بافر برای خواندن داده
+constexpr int MAX_EVENTS = 10; // حداکثر رویدادهای epoll در هر بار انتظار
 
 // --- تابع ساخت سوکت سرور ---
 // خروجی: عدد صحیح (دسکریپتور سوکت)
@@ -89,27 +91,72 @@ int main() {
     listen_socket(server_socket, BACKLOG);
     LOG_INFO("Server is running on port " << PORT);
 
-    // --- حلقه اصلی سرور ---
-    while (true) {
-        int address_length = sizeof(server_address);
-        int client_socket = accept_client(server_socket, &server_address, &address_length);
-        if (client_socket < 0) continue;
-
-        // --- خواندن داده از کلاینت ---
-        char buffer[BUFFER_SIZE] = {0};
-        ssize_t bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
-        if (bytes_read > 0) {
-            buffer[bytes_read] = '\0';
-            LOG_INFO("Received request:\n" << buffer);
-        }
-
-        // --- ارسال پاسخ HTTP ---
-        send_http_response(client_socket, "Hello, Modular World!");
-
-        // --- بستن اتصال با کلاینت ---
-        close(client_socket);
+    // --- ساخت epoll instance ---
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        LOG_ERROR("epoll_create1 failed");
+        close(server_socket);
+        exit(1);
     }
 
+    epoll_event ev, events[MAX_EVENTS];
+    ev.events = EPOLLIN;
+    ev.data.fd = server_socket;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket, &ev) == -1) {
+        LOG_ERROR("epoll_ctl: server_socket");
+        close(server_socket);
+        close(epoll_fd);
+        exit(1);
+    }
+
+    // --- حلقه اصلی سرور با epoll ---
+    while (true) {
+        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (nfds == -1) {
+            LOG_ERROR("epoll_wait failed");
+            break;
+        }
+        for (int n = 0; n < nfds; ++n) {
+            if (events[n].data.fd == server_socket) {
+                // اتصال جدید
+                sockaddr_in client_addr;
+                socklen_t addrlen = sizeof(client_addr);
+                int client_socket = accept(server_socket, reinterpret_cast<sockaddr*>(&client_addr), &addrlen);
+                if (client_socket >= 0) {
+                    // اضافه کردن کلاینت به epoll
+                    epoll_event client_ev;
+                    client_ev.events = EPOLLIN;
+                    client_ev.data.fd = client_socket;
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket, &client_ev) == -1) {
+                        LOG_ERROR("epoll_ctl: client_socket");
+                        close(client_socket);
+                    } else {
+                        LOG_INFO("Client connected");
+                    }
+                } else {
+                    LOG_ERROR("Accept failed");
+                }
+            } else {
+                // داده از کلاینت
+                char buffer[BUFFER_SIZE] = {0};
+                ssize_t bytes_read = read(events[n].data.fd, buffer, BUFFER_SIZE - 1);
+                if (bytes_read <= 0) {
+                    // کلاینت قطع شد یا خطا
+                    close(events[n].data.fd);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[n].data.fd, nullptr);
+                    LOG_INFO("Client disconnected");
+                } else {
+                    buffer[bytes_read] = '\0';
+                    LOG_INFO("Received request:\n" << buffer);
+                    send_http_response(events[n].data.fd, "Hello, Modular World!");
+                    // بعد از پاسخ، اتصال را می‌بندیم (مدل ساده)
+                    close(events[n].data.fd);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[n].data.fd, nullptr);
+                }
+            }
+        }
+    }
     close(server_socket);
+    close(epoll_fd);
     return 0;
 }
