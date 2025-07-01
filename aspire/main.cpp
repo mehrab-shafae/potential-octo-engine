@@ -23,7 +23,7 @@ int main() {
     address.sin_port = htons(PORT);
 
     // 3. بایند کردن سوکت به پورت
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0) {
         std::cerr << "Bind failed" << std::endl;
         close(server_fd);
         return 1;
@@ -38,7 +38,7 @@ int main() {
     std::cout << "Listening on port " << PORT << "..." << std::endl;
 
     // 5. پذیرش اولین اتصال
-    client_fd = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
+    client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&address), reinterpret_cast<socklen_t*>(&addrlen));
     if (client_fd < 0) {
         std::cerr << "Accept failed" << std::endl;
         close(server_fd);
@@ -47,7 +47,8 @@ int main() {
 
     // 6. خواندن درخواست کلاینت
     char buffer[3000] = {0};
-    int valread = read(client_fd, buffer, 2999);
+    ssize_t valread = read(client_fd, buffer, 2999);
+    (void)valread;
     std::cout << "Received request:\n" << buffer << std::endl;
 
     // 7. ساخت پاسخ HTTP ساده
