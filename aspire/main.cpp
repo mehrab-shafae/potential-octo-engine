@@ -29,24 +29,6 @@ constexpr int MAX_EVENTS         = 100;   // حداکثر رویدادهای epo
 constexpr int CONNECTION_TIMEOUT = 30;    // timeout اتصال (ثانیه)
 constexpr int MAX_HEADERS        = 50;    // حداکثر تعداد header ها
 
-// --- ساختار برای نگهداری اطلاعات اتصال ---
-struct Connection
-{
-    int         fd;
-    std::string buffer;
-    std::string send_buffer; // بافر برای داده‌های باقی‌مانده جهت ارسال (EPOLLOUT)
-    time_t      last_activity;
-    bool        keep_alive;
-    std::queue<HttpParser> request_queue; // صف درخواست‌های کامل
-    std::queue<std::string> response_queue; // صف پاسخ‌ها
-    bool        chunked_streaming = false; // آیا این connection در حال stream است؟
-    int         stream_chunk_idx = 0;      // شماره chunk فعلی برای stream
-    time_t      last_stream_time = 0;      // آخرین زمان ارسال chunk
-
-    Connection () : fd (-1), last_activity (0), keep_alive (false) {}
-    Connection (int socket_fd) : fd (socket_fd), last_activity (time (nullptr)), keep_alive (false) {}
-};
-
 // --- کلاس HTTP Parser ---
 class HttpParser
 {
@@ -179,6 +161,24 @@ class HttpParser
         headers[ key ] = value;
         return true;
     }
+};
+
+// --- ساختار برای نگهداری اطلاعات اتصال ---
+struct Connection
+{
+    int         fd;
+    std::string buffer;
+    std::string send_buffer; // بافر برای داده‌های باقی‌مانده جهت ارسال (EPOLLOUT)
+    time_t      last_activity;
+    bool        keep_alive;
+    std::queue<HttpParser> request_queue; // صف درخواست‌های کامل
+    std::queue<std::string> response_queue; // صف پاسخ‌ها
+    bool        chunked_streaming = false; // آیا این connection در حال stream است؟
+    int         stream_chunk_idx = 0;      // شماره chunk فعلی برای stream
+    time_t      last_stream_time = 0;      // آخرین زمان ارسال chunk
+
+    Connection () : fd (-1), last_activity (0), keep_alive (false) {}
+    Connection (int socket_fd) : fd (socket_fd), last_activity (time (nullptr)), keep_alive (false) {}
 };
 
 // --- تابع تنظیم non-blocking mode ---
@@ -529,7 +529,8 @@ int main ()
                 }
 
                 Connection& conn   = conn_it->second;
-                HttpParser& parser = parser_it->second;
+                // حذف parser_in_map چون دیگر استفاده نمی‌شود
+                // HttpParser& parser_in_map = parser_it->second;
 
                 // خواندن داده در حالت EPOLLET: تا جایی که می‌شود بخوان (برای جلوگیری از wakeup بیهوده)
                 bool client_closed = false;
@@ -555,15 +556,15 @@ int main ()
 
                 // --- استخراج و صف‌بندی همه درخواست‌های کامل (pipelining) ---
                 while (true) {
-                    HttpParser parser;
-                    if (parser.parse_request(conn.buffer)) {
-                        conn.request_queue.push(parser);
+                    HttpParser parser_tmp;
+                    if (parser_tmp.parse_request(conn.buffer)) {
+                        conn.request_queue.push(parser_tmp);
                         // حذف داده مصرف‌شده از بافر
                         size_t req_len = conn.buffer.find("\r\n\r\n");
                         if (req_len != std::string::npos) {
                             req_len += 4; // طول \r\n\r\n
                             // اگر body هم هست، باید Content-Length را هم در نظر بگیریم
-                            auto headers = parser.get_headers();
+                            auto headers = parser_tmp.get_headers();
                             auto it = headers.find("Content-Length");
                             if (it != headers.end()) {
                                 size_t content_len = std::stoul(it->second);
@@ -580,9 +581,9 @@ int main ()
 
                 // --- پردازش صف درخواست‌ها و تولید پاسخ (pipelining) ---
                 while (!conn.request_queue.empty()) {
-                    HttpParser& parser = conn.request_queue.front();
+                    HttpParser& parser_in_queue = conn.request_queue.front();
                     bool keep_alive = false, is_chunked_stream = false;
-                    std::string response = handle_http_request(parser, keep_alive, is_chunked_stream, &conn);
+                    std::string response = handle_http_request(parser_in_queue, keep_alive, is_chunked_stream, &conn);
                     conn.keep_alive = keep_alive;
                     if (is_chunked_stream) {
                         // شروع stream: فقط هدر را queue کن، بقیه chunkها را در EPOLLOUT مدیریت کن
