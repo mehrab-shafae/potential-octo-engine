@@ -203,6 +203,16 @@ int create_server_socket ()
         LOG_ERROR ("setsockopt SO_REUSEADDR failed");
     }
 
+    // Set large receive/send buffer (1MB)
+    int rcvbuf = 1 << 20;
+    int sndbuf = 1 << 20;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+        LOG_ERROR("setsockopt SO_RCVBUF failed");
+    }
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+        LOG_ERROR("setsockopt SO_SNDBUF failed");
+    }
+
     set_nonblocking (sock);
     LOG_INFO ("Socket created");
     return sock;
@@ -458,6 +468,15 @@ int main ()
                 #endif
                 if (client_socket >= 0)
                 {
+                    // Set large receive/send buffer (1MB) for client
+                    int rcvbuf = 1 << 20;
+                    int sndbuf = 1 << 20;
+                    if (setsockopt(client_socket, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+                        LOG_ERROR("setsockopt SO_RCVBUF (client) failed");
+                    }
+                    if (setsockopt(client_socket, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+                        LOG_ERROR("setsockopt SO_SNDBUF (client) failed");
+                    }
                     // اضافه کردن کلاینت به epoll
                     epoll_event client_ev;
                     client_ev.events  = EPOLLIN | EPOLLET;  // Edge triggered
