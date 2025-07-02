@@ -3,6 +3,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <algorithm>
 #include <cstring>
@@ -269,7 +270,8 @@ void send_http_response (int client_sock, int status_code, const std::string& co
 
     response += "\r\n" + body;
 
-    send (client_sock, response.c_str (), response.length (), 0);
+    // Use MSG_NOSIGNAL to avoid SIGPIPE
+    send (client_sock, response.c_str (), response.length (), MSG_NOSIGNAL);
     LOG_INFO ("Response sent: " << status_code);
 }
 
@@ -366,6 +368,8 @@ void cleanup_timeout_connections (int epoll_fd, std::map<int, Connection>& conne
 
 int main ()
 {
+    // Ignore SIGPIPE globally
+    signal(SIGPIPE, SIG_IGN);
     // --- ساخت سوکت سرور ---
     int server_socket = create_server_socket ();
 
@@ -439,11 +443,21 @@ int main ()
                 // اتصال جدید
                 sockaddr_in client_addr;
                 socklen_t   addrlen       = sizeof (client_addr);
-                int         client_socket = accept (server_socket, reinterpret_cast<sockaddr*> (&client_addr), &addrlen);
+                int         client_socket;
+                #ifdef SOCK_NONBLOCK
+                client_socket = accept4 (server_socket, reinterpret_cast<sockaddr*> (&client_addr), &addrlen, SOCK_NONBLOCK);
+                if (client_socket == -1 && (errno == ENOSYS || errno == EINVAL))
+                {
+                    // Fallback if accept4 not supported
+                    client_socket = accept (server_socket, reinterpret_cast<sockaddr*> (&client_addr), &addrlen);
+                    if (client_socket >= 0) set_nonblocking(client_socket);
+                }
+                #else
+                client_socket = accept (server_socket, reinterpret_cast<sockaddr*> (&client_addr), &addrlen);
+                if (client_socket >= 0) set_nonblocking(client_socket);
+                #endif
                 if (client_socket >= 0)
                 {
-                    set_nonblocking (client_socket);
-
                     // اضافه کردن کلاینت به epoll
                     epoll_event client_ev;
                     client_ev.events  = EPOLLIN | EPOLLET;  // Edge triggered
