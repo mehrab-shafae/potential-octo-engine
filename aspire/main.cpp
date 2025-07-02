@@ -7,6 +7,7 @@
 #include <csignal>
 #include <sys/wait.h>
 #include <thread> // برای sleep
+#include <queue> // برای صف درخواست و پاسخ
 
 #include <algorithm>
 #include <cstring>
@@ -36,6 +37,11 @@ struct Connection
     std::string send_buffer; // بافر برای داده‌های باقی‌مانده جهت ارسال (EPOLLOUT)
     time_t      last_activity;
     bool        keep_alive;
+    std::queue<HttpParser> request_queue; // صف درخواست‌های کامل
+    std::queue<std::string> response_queue; // صف پاسخ‌ها
+    bool        chunked_streaming = false; // آیا این connection در حال stream است؟
+    int         stream_chunk_idx = 0;      // شماره chunk فعلی برای stream
+    time_t      last_stream_time = 0;      // آخرین زمان ارسال chunk
 
     Connection () : fd (-1), last_activity (0), keep_alive (false) {}
     Connection (int socket_fd) : fd (socket_fd), last_activity (time (nullptr)), keep_alive (false) {}
@@ -250,155 +256,80 @@ void listen_socket (int sock, int backlog)
     LOG_INFO ("Listening for clients...");
 }
 
-// --- تابع ارسال پاسخ HTTP بهبود یافته ---
-void send_http_response (int client_sock, int status_code, const std::string& content_type, const std::string& body, bool keep_alive = false, Connection* conn_ptr = nullptr, int epoll_fd = -1)
-{
+// --- ساخت پاسخ HTTP (بدون ارسال مستقیم) ---
+std::string build_http_response(int status_code, const std::string& content_type, const std::string& body, bool keep_alive = false) {
     std::string status_text;
     switch (status_code)
     {
-        case 200:
-            status_text = "OK";
-            break;
-        case 400:
-            status_text = "Bad Request";
-            break;
-        case 404:
-            status_text = "Not Found";
-            break;
-        case 500:
-            status_text = "Internal Server Error";
-            break;
-        default:
-            status_text = "Unknown";
-            break;
+        case 200: status_text = "OK"; break;
+        case 400: status_text = "Bad Request"; break;
+        case 404: status_text = "Not Found"; break;
+        case 500: status_text = "Internal Server Error"; break;
+        default: status_text = "Unknown"; break;
     }
-
-    std::string response = "HTTP/1.1 " + std::to_string (status_code) + " " + status_text + "\r\n";
+    std::string response = "HTTP/1.1 " + std::to_string(status_code) + " " + status_text + "\r\n";
     response += "Content-Type: " + content_type + "\r\n";
-    response += "Content-Length: " + std::to_string (body.length ()) + "\r\n";
-
-    if (keep_alive)
-    {
-        response += "Connection: keep-alive\r\n";
-    }
-    else
-    {
-        response += "Connection: close\r\n";
-    }
-
+    response += "Content-Length: " + std::to_string(body.length()) + "\r\n";
+    response += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
     response += "\r\n" + body;
-
-    ssize_t sent = send (client_sock, response.c_str (), response.length (), MSG_NOSIGNAL);
-    if (sent < 0)
-        sent = 0;
-    size_t sent_sz = sent > 0 ? static_cast<size_t>(sent) : 0;
-    if (conn_ptr && sent_sz < response.length()) {
-        // اگر همه داده ارسال نشد، باقی‌مانده را در send_buffer ذخیره کن و EPOLLOUT فعال کن
-        conn_ptr->send_buffer = response.substr(sent_sz);
-        epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        ev.data.fd = client_sock;
-        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_sock, &ev);
-    } else {
-        if (conn_ptr) conn_ptr->send_buffer.clear();
-        LOG_INFO ("Response sent: " << status_code);
-    }
+    return response;
 }
 
-// --- ارسال پاسخ chunked (stream) ---
-void send_chunked_response(int client_sock, int epoll_fd, Connection* conn_ptr, bool keep_alive = false) {
-    // هدر اولیه chunked
+// --- ساخت پاسخ chunked (stream) برای pipelining ---
+std::string build_chunked_header(bool keep_alive = false) {
     std::string response =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/plain\r\n"
         "Transfer-Encoding: chunked\r\n";
-    if (keep_alive)
-        response += "Connection: keep-alive\r\n";
-    else
-        response += "Connection: close\r\n";
+    response += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
     response += "\r\n";
-    // ارسال هدر
-    send(client_sock, response.c_str(), response.size(), MSG_NOSIGNAL);
-
-    // چند chunk نمونه (می‌توانید این را به صورت پویا یا با داده واقعی جایگزین کنید)
-    for (int i = 1; i <= 5; ++i) {
-        std::string chunk_data = "chunk " + std::to_string(i) + "\n";
-        std::string chunk =
-            std::to_string(chunk_data.size()) + "\r\n" + chunk_data + "\r\n";
-        send(client_sock, chunk.c_str(), chunk.size(), MSG_NOSIGNAL);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // شبیه‌سازی stream
-    }
-    // پایان chunked
-    std::string end_chunk = "0\r\n\r\n";
-    send(client_sock, end_chunk.c_str(), end_chunk.size(), MSG_NOSIGNAL);
-    if (conn_ptr) conn_ptr->send_buffer.clear();
-    LOG_INFO("Chunked response sent (stream)");
+    return response;
 }
+std::string build_chunk(const std::string& data) {
+    return std::to_string(data.size()) + "\r\n" + data + "\r\n";
+}
+const std::string end_chunk = "0\r\n\r\n";
 
-// --- تابع پردازش درخواست HTTP ---
-void handle_http_request (Connection& conn, const HttpParser& parser, int epoll_fd)
-{
-    const std::string&                        method  = parser.get_method ();
-    const std::string&                        path    = parser.get_path ();
-    const std::map<std::string, std::string>& headers = parser.get_headers ();
-
-    LOG_INFO ("Request: " << method << " " << path);
-
+// --- پردازش درخواست و تولید پاسخ (بدون ارسال مستقیم) ---
+std::string handle_http_request(const HttpParser& parser, bool& keep_alive, bool& is_chunked_stream, Connection* conn = nullptr) {
+    const std::string& method = parser.get_method();
+    const std::string& path = parser.get_path();
+    const auto& headers = parser.get_headers();
     // Check for keep-alive
-    auto it         = headers.find ("Connection");
-    bool keep_alive = (it != headers.end () && it->second == "keep-alive");
-
-    // Simple routing
-    if (method == "GET")
-    {
-        if (path == "/" || path == "/index.html")
-        {
+    auto it = headers.find("Connection");
+    keep_alive = (it != headers.end() && it->second == "keep-alive");
+    is_chunked_stream = false;
+    if (method == "GET") {
+        if (path == "/" || path == "/index.html") {
             std::string body =
                 "<html><body><h1>Welcome to Modular HTTP Server</h1>"
                 "<p>This is an event-driven HTTP server using epoll.</p>"
-                "<p>Current time: " +
-                std::to_string (time (nullptr)) +
-                "</p>"
+                "<p>Current time: " + std::to_string(time(nullptr)) + "</p>"
                 "</body></html>";
-            send_http_response (conn.fd, 200, "text/html", body, keep_alive, &conn, epoll_fd);
-        }
-        else if (path == "/api/status")
-        {
+            return build_http_response(200, "text/html", body, keep_alive);
+        } else if (path == "/api/status") {
             std::string body = "{\"status\": \"running\", \"server\": \"modular-epoll\"}";
-            send_http_response (conn.fd, 200, "application/json", body, keep_alive, &conn, epoll_fd);
-        }
-        else if (path == "/api/stream")
-        {
-            // پاسخ chunked (stream)
-            send_chunked_response(conn.fd, epoll_fd, &conn, keep_alive);
-        }
-        else
-        {
+            return build_http_response(200, "application/json", body, keep_alive);
+        } else if (path == "/api/stream") {
+            is_chunked_stream = true;
+            if (conn) conn->chunked_streaming = true;
+            return build_chunked_header(keep_alive);
+        } else {
             std::string body = "<html><body><h1>404 Not Found</h1></body></html>";
-            send_http_response (conn.fd, 404, "text/html", body, keep_alive, &conn, epoll_fd);
+            return build_http_response(404, "text/html", body, keep_alive);
         }
-    }
-    else if (method == "POST")
-    {
-        if (path == "/api/echo")
-        {
-            std::string body = "{\"message\": \"Echo: " + parser.get_body () + "\"}";
-            send_http_response (conn.fd, 200, "application/json", body, keep_alive, &conn, epoll_fd);
-        }
-        else
-        {
+    } else if (method == "POST") {
+        if (path == "/api/echo") {
+            std::string body = "{\"message\": \"Echo: " + parser.get_body() + "\"}";
+            return build_http_response(200, "application/json", body, keep_alive);
+        } else {
             std::string body = "<html><body><h1>404 Not Found</h1></body></html>";
-            send_http_response (conn.fd, 404, "text/html", body, keep_alive, &conn, epoll_fd);
+            return build_http_response(404, "text/html", body, keep_alive);
         }
-    }
-    else
-    {
+    } else {
         std::string body = "<html><body><h1>405 Method Not Allowed</h1></body></html>";
-        send_http_response (conn.fd, 405, "text/html", body, keep_alive, &conn, epoll_fd);
+        return build_http_response(405, "text/html", body, keep_alive);
     }
-
-    conn.keep_alive    = keep_alive;
-    conn.last_activity = time (nullptr);
 }
 
 // --- تابع بستن اتصال ---
@@ -600,26 +531,6 @@ int main ()
                 Connection& conn   = conn_it->second;
                 HttpParser& parser = parser_it->second;
 
-                // اگر EPOLLOUT فعال است و داده‌ای برای ارسال داریم
-                if (events[n].events & EPOLLOUT) {
-                    if (!conn.send_buffer.empty()) {
-                        ssize_t sent = send(client_fd, conn.send_buffer.c_str(), conn.send_buffer.size(), MSG_NOSIGNAL);
-                        if (sent < 0) sent = 0;
-                        size_t sent_sz = sent > 0 ? static_cast<size_t>(sent) : 0;
-                        conn.send_buffer = conn.send_buffer.substr(sent_sz);
-                        if (conn.send_buffer.empty()) {
-                            // همه داده ارسال شد، EPOLLOUT را حذف کن
-                            epoll_event ev_mod;
-                            ev_mod.events = EPOLLIN | EPOLLET;
-                            ev_mod.data.fd = client_fd;
-                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &ev_mod);
-                        }
-                    }
-                    // اگر فقط EPOLLOUT بود، ادامه بده (نیازی به خواندن نیست)
-                    if (!(events[n].events & EPOLLIN))
-                        continue;
-                }
-
                 // خواندن داده در حالت EPOLLET: تا جایی که می‌شود بخوان (برای جلوگیری از wakeup بیهوده)
                 bool client_closed = false;
                 while (true) {
@@ -634,7 +545,7 @@ int main ()
                             LOG_INFO("Client disconnected: " << client_fd);
                             client_closed = true;
                         }
-                        break; // یا داده‌ای نیست یا باید بعداً دوباره تلاش کنیم
+                        break;
                     }
                     buffer[bytes_read] = '\0';
                     conn.buffer += buffer;
@@ -642,26 +553,104 @@ int main ()
                 }
                 if (client_closed) continue;
 
-                // اگر داده‌ای در بافر هست، پردازش کن
-                if (!conn.buffer.empty()) {
+                // --- استخراج و صف‌بندی همه درخواست‌های کامل (pipelining) ---
+                while (true) {
+                    HttpParser parser;
                     if (parser.parse_request(conn.buffer)) {
-                        handle_http_request(conn, parser, epoll_fd);
-                        if (!conn.keep_alive && conn.send_buffer.empty()) {
+                        conn.request_queue.push(parser);
+                        // حذف داده مصرف‌شده از بافر
+                        size_t req_len = conn.buffer.find("\r\n\r\n");
+                        if (req_len != std::string::npos) {
+                            req_len += 4; // طول \r\n\r\n
+                            // اگر body هم هست، باید Content-Length را هم در نظر بگیریم
+                            auto headers = parser.get_headers();
+                            auto it = headers.find("Content-Length");
+                            if (it != headers.end()) {
+                                size_t content_len = std::stoul(it->second);
+                                req_len += content_len;
+                            }
+                            conn.buffer = conn.buffer.substr(req_len);
+                        } else {
+                            conn.buffer.clear();
+                        }
+                    } else {
+                        break; // دیگر درخواست کامل نداریم
+                    }
+                }
+
+                // --- پردازش صف درخواست‌ها و تولید پاسخ (pipelining) ---
+                while (!conn.request_queue.empty()) {
+                    HttpParser& parser = conn.request_queue.front();
+                    bool keep_alive = false, is_chunked_stream = false;
+                    std::string response = handle_http_request(parser, keep_alive, is_chunked_stream, &conn);
+                    conn.keep_alive = keep_alive;
+                    if (is_chunked_stream) {
+                        // شروع stream: فقط هدر را queue کن، بقیه chunkها را در EPOLLOUT مدیریت کن
+                        conn.response_queue.push(response);
+                        conn.chunked_streaming = true;
+                        conn.stream_chunk_idx = 1;
+                        conn.last_stream_time = time(nullptr);
+                    } else {
+                        conn.response_queue.push(response);
+                    }
+                    conn.request_queue.pop();
+                }
+
+                // --- اگر چیزی برای ارسال هست و EPOLLOUT فعال نیست، فعال کن ---
+                if (!conn.response_queue.empty() && conn.send_buffer.empty()) {
+                    conn.send_buffer = conn.response_queue.front();
+                    conn.response_queue.pop();
+                    epoll_event ev_mod;
+                    ev_mod.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                    ev_mod.data.fd = client_fd;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &ev_mod);
+                }
+
+                // اگر EPOLLOUT فعال است و داده‌ای برای ارسال داریم
+                if (events[n].events & EPOLLOUT) {
+                    // --- ارسال پاسخ‌های صف (pipelining) ---
+                    while (!conn.send_buffer.empty()) {
+                        ssize_t sent = send(client_fd, conn.send_buffer.c_str(), conn.send_buffer.size(), MSG_NOSIGNAL);
+                        if (sent < 0) sent = 0;
+                        size_t sent_sz = sent > 0 ? static_cast<size_t>(sent) : 0;
+                        conn.send_buffer = conn.send_buffer.substr(sent_sz);
+                        if (!conn.send_buffer.empty()) break; // هنوز داده باقی مانده
+                        // اگر stream فعال است، chunk بعدی را ارسال کن
+                        if (conn.chunked_streaming) {
+                            // هر نیم ثانیه یک chunk بفرست
+                            if (conn.stream_chunk_idx <= 5 && time(nullptr) - conn.last_stream_time >= 1) {
+                                std::string chunk_data = "chunk " + std::to_string(conn.stream_chunk_idx) + "\n";
+                                std::string chunk = build_chunk(chunk_data);
+                                conn.send_buffer = chunk;
+                                conn.stream_chunk_idx++;
+                                conn.last_stream_time = time(nullptr);
+                            } else if (conn.stream_chunk_idx > 5) {
+                                conn.send_buffer = end_chunk;
+                                conn.chunked_streaming = false;
+                            } else {
+                                break; // هنوز زمان chunk بعدی نرسیده
+                            }
+                        } else if (!conn.response_queue.empty()) {
+                            conn.send_buffer = conn.response_queue.front();
+                            conn.response_queue.pop();
+                        }
+                    }
+                    // اگر همه داده‌ها ارسال شد، EPOLLOUT را حذف کن
+                    if (conn.send_buffer.empty()) {
+                        epoll_event ev_mod;
+                        ev_mod.events = EPOLLIN | EPOLLET;
+                        ev_mod.data.fd = client_fd;
+                        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &ev_mod);
+                        // اگر keep-alive خاموش است و صف پاسخ خالی است، connection را ببند
+                        if (!conn.keep_alive && conn.response_queue.empty() && !conn.chunked_streaming) {
                             close_connection(epoll_fd, conn);
                             connections.erase(client_fd);
                             parsers.erase(client_fd);
-                        } else if (conn.send_buffer.empty()) {
-                            // Reset for next request
-                            conn.buffer.clear();
-                            parser.reset();
                         }
-                    } else if (conn.buffer.length() > BUFFER_SIZE * 2) {
-                        // Buffer too large - close connection
-                        LOG_ERROR("Buffer too large, closing connection: " << client_fd);
-                        close_connection(epoll_fd, conn);
-                        connections.erase(client_fd);
-                        parsers.erase(client_fd);
                     }
+                    // اگر فقط EPOLLOUT بود، ادامه بده
+                    if (!(events[n].events & EPOLLIN))
+                        continue;
                 }
             }
         }
