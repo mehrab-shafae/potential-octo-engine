@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <csignal>
 #include <sys/wait.h>
+#include <thread> // برای sleep
 
 #include <algorithm>
 #include <cstring>
@@ -304,6 +305,36 @@ void send_http_response (int client_sock, int status_code, const std::string& co
     }
 }
 
+// --- ارسال پاسخ chunked (stream) ---
+void send_chunked_response(int client_sock, int epoll_fd, Connection* conn_ptr, bool keep_alive = false) {
+    // هدر اولیه chunked
+    std::string response =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Transfer-Encoding: chunked\r\n";
+    if (keep_alive)
+        response += "Connection: keep-alive\r\n";
+    else
+        response += "Connection: close\r\n";
+    response += "\r\n";
+    // ارسال هدر
+    send(client_sock, response.c_str(), response.size(), MSG_NOSIGNAL);
+
+    // چند chunk نمونه (می‌توانید این را به صورت پویا یا با داده واقعی جایگزین کنید)
+    for (int i = 1; i <= 5; ++i) {
+        std::string chunk_data = "chunk " + std::to_string(i) + "\n";
+        std::string chunk =
+            std::to_string(chunk_data.size()) + "\r\n" + chunk_data + "\r\n";
+        send(client_sock, chunk.c_str(), chunk.size(), MSG_NOSIGNAL);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // شبیه‌سازی stream
+    }
+    // پایان chunked
+    std::string end_chunk = "0\r\n\r\n";
+    send(client_sock, end_chunk.c_str(), end_chunk.size(), MSG_NOSIGNAL);
+    if (conn_ptr) conn_ptr->send_buffer.clear();
+    LOG_INFO("Chunked response sent (stream)");
+}
+
 // --- تابع پردازش درخواست HTTP ---
 void handle_http_request (Connection& conn, const HttpParser& parser, int epoll_fd)
 {
@@ -335,6 +366,11 @@ void handle_http_request (Connection& conn, const HttpParser& parser, int epoll_
         {
             std::string body = "{\"status\": \"running\", \"server\": \"modular-epoll\"}";
             send_http_response (conn.fd, 200, "application/json", body, keep_alive, &conn, epoll_fd);
+        }
+        else if (path == "/api/stream")
+        {
+            // پاسخ chunked (stream)
+            send_chunked_response(conn.fd, epoll_fd, &conn, keep_alive);
         }
         else
         {
