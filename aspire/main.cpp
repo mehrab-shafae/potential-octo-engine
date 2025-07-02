@@ -4,6 +4,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <signal.h>
+#include <csignal>
+#include <sys/wait.h>
 
 #include <algorithm>
 #include <cstring>
@@ -380,10 +382,23 @@ void cleanup_timeout_connections (int epoll_fd, std::map<int, Connection>& conne
     }
 }
 
+// --- فلگ سراسری برای graceful shutdown ---
+volatile sig_atomic_t stop_server = 0;
+
+// --- سیگنال هندلر برای SIGINT و SIGTERM ---
+void handle_signal(int signum) {
+    (void)signum; // جلوگیری از هشدار unused parameter
+    stop_server = 1;
+    LOG_INFO("Graceful shutdown signal received");
+}
+
 int main ()
 {
     // Ignore SIGPIPE globally
     signal(SIGPIPE, SIG_IGN);
+    // --- ثبت سیگنال هندلر برای graceful shutdown ---
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
     // --- ساخت سوکت سرور ---
     int server_socket = create_server_socket ();
 
@@ -444,7 +459,7 @@ int main ()
     epoll_event               events[ MAX_EVENTS ];
 
     // --- حلقه اصلی سرور با epoll ---
-    while (true)
+    while (!stop_server) // اگر سیگنال shutdown آمد، حلقه متوقف می‌شود
     {
         int nfds = epoll_wait (epoll_fd, events, MAX_EVENTS, 1000);  // 1 second timeout
         if (nfds == -1)
@@ -582,12 +597,19 @@ int main ()
         }
     }
 
-    // Cleanup
+    // --- شروع graceful shutdown: بستن همه منابع و اتصالات ---
+    LOG_INFO("Shutting down server, closing all connections...");
     for (auto& pair : connections)
     {
         close (pair.first);
     }
     close (server_socket);
     close (epoll_fd);
+
+    // اگر parent process هستیم، منتظر پایان همه childها بمانیم
+    #ifdef MULTI_PROCESS
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {}
+    #endif
+    LOG_INFO("Server exited gracefully.");
     return 0;
 }
