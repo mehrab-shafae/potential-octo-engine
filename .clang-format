@@ -14,8 +14,9 @@ SortIncludes: true
 AlignConsecutiveAssignments: true
 AlignConsecutiveDeclarations: true
 AlignTrailingComments: true
-AllowShortIfStatementsOnASingleLine: false
-AllowShortLoopsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: true
 PointerAlignment: Left
 Cpp11BracedListStyle: true
 DerivePointerAlignment: false

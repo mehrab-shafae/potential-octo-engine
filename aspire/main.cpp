@@ -561,16 +561,23 @@ int main ()
                         conn.request_queue.push(parser_tmp);
                         // حذف داده مصرف‌شده از بافر
                         size_t req_len = conn.buffer.find("\r\n\r\n");
+                        size_t content_len = 0;
                         if (req_len != std::string::npos) {
                             req_len += 4; // طول \r\n\r\n
                             // اگر body هم هست، باید Content-Length را هم در نظر بگیریم
                             auto headers = parser_tmp.get_headers();
                             auto it = headers.find("Content-Length");
                             if (it != headers.end()) {
-                                size_t content_len = std::stoul(it->second);
-                                req_len += content_len;
+                                content_len = std::stoul(it->second);
                             }
-                            conn.buffer = conn.buffer.substr(req_len);
+                            // فقط اگر کل داده (هدر + body) رسیده باشد، حذف کن
+                            if (conn.buffer.size() >= req_len + content_len) {
+                                req_len += content_len;
+                                conn.buffer = conn.buffer.substr(req_len);
+                            } else {
+                                // هنوز کل داده نرسیده، منتظر بمان
+                                break;
+                            }
                         } else {
                             conn.buffer.clear();
                         }
