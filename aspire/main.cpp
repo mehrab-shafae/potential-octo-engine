@@ -202,7 +202,11 @@ int create_server_socket ()
     {
         LOG_ERROR ("setsockopt SO_REUSEADDR failed");
     }
-
+    // --- اضافه کردن SO_REUSEPORT برای multi-process ---
+    if (setsockopt (sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof (opt)) < 0)
+    {
+        LOG_ERROR ("setsockopt SO_REUSEPORT failed");
+    }
     // Set large receive/send buffer (1MB)
     int rcvbuf = 1 << 20;
     int sndbuf = 1 << 20;
@@ -396,6 +400,22 @@ int main ()
     // --- گوش دادن برای اتصال کلاینت‌ها ---
     listen_socket (server_socket, BACKLOG);
     LOG_INFO ("Server is running on port " << PORT);
+
+    // --- Multi-process: ایجاد چندین process با fork ---
+    constexpr int NUM_PROCESSES = 4; // تعداد processها (برای تست ۴ کافی است)
+    for (int i = 1; i < NUM_PROCESSES; ++i) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            LOG_ERROR("fork failed");
+            exit(1);
+        }
+        if (pid == 0) {
+            // Child process: فقط حلقه سرور را اجرا می‌کند
+            break;
+        }
+        // Parent process: به حلقه بعدی fork می‌رود
+    }
+    // هر process (parent و child) از اینجا به بعد حلقه epoll خودش را اجرا می‌کند
 
     // --- ساخت epoll instance ---
     int epoll_fd = epoll_create1 (0);
