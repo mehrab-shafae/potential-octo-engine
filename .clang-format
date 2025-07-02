@@ -7,7 +7,7 @@ AllowShortFunctionsOnASingleLine: Inline
 BreakBeforeBraces: Allman
 SpacesInParentheses: false
 SpacesInSquareBrackets: true
-SpaceBeforeParens: Always
+SpaceBeforeParens: Never
 AlwaysBreakAfterReturnType: None
 EmptyLineBeforeAccessModifier: Always
 SortIncludes: true

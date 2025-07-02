@@ -478,7 +478,7 @@ int main ()
     // --- حلقه اصلی سرور با epoll ---
     while (!stop_server) // اگر سیگنال shutdown آمد، حلقه متوقف می‌شود
     {
-        int nfds = epoll_wait (epoll_fd, events, MAX_EVENTS, 1000);  // 1 second timeout
+        int nfds = epoll_wait (epoll_fd, events, MAX_EVENTS, 50);  // 50ms: تعادل latency و مصرف CPU
         if (nfds == -1)
         {
             if (errno == EINTR)
@@ -584,50 +584,47 @@ int main ()
                         continue;
                 }
 
-                // داده از کلاینت
-                char    buffer[ BUFFER_SIZE ];
-                ssize_t bytes_read = read (client_fd, buffer, BUFFER_SIZE - 1);
-
-                if (bytes_read <= 0)
-                {
-                    // کلاینت قطع شد یا خطا
-                    close_connection (epoll_fd, conn);
-                    connections.erase (client_fd);
-                    parsers.erase (client_fd);
-                    LOG_INFO ("Client disconnected: " << client_fd);
-                }
-                else
-                {
-                    buffer[ bytes_read ] = '\0';
-                    conn.buffer += buffer;
-                    conn.last_activity = time (nullptr);
-
-                    // Parse HTTP request
-                    if (parser.parse_request (conn.buffer))
-                    {
-                        handle_http_request (conn, parser, epoll_fd);
-
-                        if (!conn.keep_alive && conn.send_buffer.empty())
-                        {
-                            // اگر keep-alive نیست و چیزی برای ارسال نمانده، اتصال را ببند
-                            close_connection (epoll_fd, conn);
-                            connections.erase (client_fd);
-                            parsers.erase (client_fd);
+                // خواندن داده در حالت EPOLLET: تا جایی که می‌شود بخوان (برای جلوگیری از wakeup بیهوده)
+                bool client_closed = false;
+                while (true) {
+                    char buffer[BUFFER_SIZE];
+                    ssize_t bytes_read = read(client_fd, buffer, BUFFER_SIZE - 1);
+                    if (bytes_read <= 0) {
+                        if (bytes_read == 0 || (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                            // کلاینت قطع شد یا خطای جدی
+                            close_connection(epoll_fd, conn);
+                            connections.erase(client_fd);
+                            parsers.erase(client_fd);
+                            LOG_INFO("Client disconnected: " << client_fd);
+                            client_closed = true;
                         }
-                        else if (conn.send_buffer.empty())
-                        {
-                            // Reset for next request
-                            conn.buffer.clear ();
-                            parser.reset ();
-                        }
+                        break; // یا داده‌ای نیست یا باید بعداً دوباره تلاش کنیم
                     }
-                    else if (conn.buffer.length () > BUFFER_SIZE * 2)
-                    {
+                    buffer[bytes_read] = '\0';
+                    conn.buffer += buffer;
+                    conn.last_activity = time(nullptr);
+                }
+                if (client_closed) continue;
+
+                // اگر داده‌ای در بافر هست، پردازش کن
+                if (!conn.buffer.empty()) {
+                    if (parser.parse_request(conn.buffer)) {
+                        handle_http_request(conn, parser, epoll_fd);
+                        if (!conn.keep_alive && conn.send_buffer.empty()) {
+                            close_connection(epoll_fd, conn);
+                            connections.erase(client_fd);
+                            parsers.erase(client_fd);
+                        } else if (conn.send_buffer.empty()) {
+                            // Reset for next request
+                            conn.buffer.clear();
+                            parser.reset();
+                        }
+                    } else if (conn.buffer.length() > BUFFER_SIZE * 2) {
                         // Buffer too large - close connection
-                        LOG_ERROR ("Buffer too large, closing connection: " << client_fd);
-                        close_connection (epoll_fd, conn);
-                        connections.erase (client_fd);
-                        parsers.erase (client_fd);
+                        LOG_ERROR("Buffer too large, closing connection: " << client_fd);
+                        close_connection(epoll_fd, conn);
+                        connections.erase(client_fd);
+                        parsers.erase(client_fd);
                     }
                 }
             }
