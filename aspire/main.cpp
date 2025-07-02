@@ -32,6 +32,7 @@ struct Connection
 {
     int         fd;
     std::string buffer;
+    std::string send_buffer; // بافر برای داده‌های باقی‌مانده جهت ارسال (EPOLLOUT)
     time_t      last_activity;
     bool        keep_alive;
 
@@ -249,7 +250,7 @@ void listen_socket (int sock, int backlog)
 }
 
 // --- تابع ارسال پاسخ HTTP بهبود یافته ---
-void send_http_response (int client_sock, int status_code, const std::string& content_type, const std::string& body, bool keep_alive = false)
+void send_http_response (int client_sock, int status_code, const std::string& content_type, const std::string& body, bool keep_alive = false, Connection* conn_ptr = nullptr, int epoll_fd = -1)
 {
     std::string status_text;
     switch (status_code)
@@ -286,13 +287,25 @@ void send_http_response (int client_sock, int status_code, const std::string& co
 
     response += "\r\n" + body;
 
-    // Use MSG_NOSIGNAL to avoid SIGPIPE
-    send (client_sock, response.c_str (), response.length (), MSG_NOSIGNAL);
-    LOG_INFO ("Response sent: " << status_code);
+    ssize_t sent = send (client_sock, response.c_str (), response.length (), MSG_NOSIGNAL);
+    if (sent < 0)
+        sent = 0;
+    size_t sent_sz = sent > 0 ? static_cast<size_t>(sent) : 0;
+    if (conn_ptr && sent_sz < response.length()) {
+        // اگر همه داده ارسال نشد، باقی‌مانده را در send_buffer ذخیره کن و EPOLLOUT فعال کن
+        conn_ptr->send_buffer = response.substr(sent_sz);
+        epoll_event ev;
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        ev.data.fd = client_sock;
+        epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_sock, &ev);
+    } else {
+        if (conn_ptr) conn_ptr->send_buffer.clear();
+        LOG_INFO ("Response sent: " << status_code);
+    }
 }
 
 // --- تابع پردازش درخواست HTTP ---
-void handle_http_request (Connection& conn, const HttpParser& parser)
+void handle_http_request (Connection& conn, const HttpParser& parser, int epoll_fd)
 {
     const std::string&                        method  = parser.get_method ();
     const std::string&                        path    = parser.get_path ();
@@ -316,17 +329,17 @@ void handle_http_request (Connection& conn, const HttpParser& parser)
                 std::to_string (time (nullptr)) +
                 "</p>"
                 "</body></html>";
-            send_http_response (conn.fd, 200, "text/html", body, keep_alive);
+            send_http_response (conn.fd, 200, "text/html", body, keep_alive, &conn, epoll_fd);
         }
         else if (path == "/api/status")
         {
             std::string body = "{\"status\": \"running\", \"server\": \"modular-epoll\"}";
-            send_http_response (conn.fd, 200, "application/json", body, keep_alive);
+            send_http_response (conn.fd, 200, "application/json", body, keep_alive, &conn, epoll_fd);
         }
         else
         {
             std::string body = "<html><body><h1>404 Not Found</h1></body></html>";
-            send_http_response (conn.fd, 404, "text/html", body, keep_alive);
+            send_http_response (conn.fd, 404, "text/html", body, keep_alive, &conn, epoll_fd);
         }
     }
     else if (method == "POST")
@@ -334,18 +347,18 @@ void handle_http_request (Connection& conn, const HttpParser& parser)
         if (path == "/api/echo")
         {
             std::string body = "{\"message\": \"Echo: " + parser.get_body () + "\"}";
-            send_http_response (conn.fd, 200, "application/json", body, keep_alive);
+            send_http_response (conn.fd, 200, "application/json", body, keep_alive, &conn, epoll_fd);
         }
         else
         {
             std::string body = "<html><body><h1>404 Not Found</h1></body></html>";
-            send_http_response (conn.fd, 404, "text/html", body, keep_alive);
+            send_http_response (conn.fd, 404, "text/html", body, keep_alive, &conn, epoll_fd);
         }
     }
     else
     {
         std::string body = "<html><body><h1>405 Method Not Allowed</h1></body></html>";
-        send_http_response (conn.fd, 405, "text/html", body, keep_alive);
+        send_http_response (conn.fd, 405, "text/html", body, keep_alive, &conn, epoll_fd);
     }
 
     conn.keep_alive    = keep_alive;
@@ -443,7 +456,11 @@ int main ()
 
     // --- اضافه کردن سرور سوکت به epoll ---
     epoll_event ev;
+#if defined(EPOLLEXCLUSIVE)
+    ev.events  = EPOLLIN | EPOLLEXCLUSIVE; // فقط برای سرور سوکت
+#else
     ev.events  = EPOLLIN;
+#endif
     ev.data.fd = server_socket;
     if (epoll_ctl (epoll_fd, EPOLL_CTL_ADD, server_socket, &ev) == -1)
     {
@@ -535,7 +552,6 @@ int main ()
             }
             else
             {
-                // داده از کلاینت
                 int  client_fd = events[ n ].data.fd;
                 auto conn_it   = connections.find (client_fd);
                 auto parser_it = parsers.find (client_fd);
@@ -548,6 +564,27 @@ int main ()
                 Connection& conn   = conn_it->second;
                 HttpParser& parser = parser_it->second;
 
+                // اگر EPOLLOUT فعال است و داده‌ای برای ارسال داریم
+                if (events[n].events & EPOLLOUT) {
+                    if (!conn.send_buffer.empty()) {
+                        ssize_t sent = send(client_fd, conn.send_buffer.c_str(), conn.send_buffer.size(), MSG_NOSIGNAL);
+                        if (sent < 0) sent = 0;
+                        size_t sent_sz = sent > 0 ? static_cast<size_t>(sent) : 0;
+                        conn.send_buffer = conn.send_buffer.substr(sent_sz);
+                        if (conn.send_buffer.empty()) {
+                            // همه داده ارسال شد، EPOLLOUT را حذف کن
+                            epoll_event ev_mod;
+                            ev_mod.events = EPOLLIN | EPOLLET;
+                            ev_mod.data.fd = client_fd;
+                            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &ev_mod);
+                        }
+                    }
+                    // اگر فقط EPOLLOUT بود، ادامه بده (نیازی به خواندن نیست)
+                    if (!(events[n].events & EPOLLIN))
+                        continue;
+                }
+
+                // داده از کلاینت
                 char    buffer[ BUFFER_SIZE ];
                 ssize_t bytes_read = read (client_fd, buffer, BUFFER_SIZE - 1);
 
@@ -568,16 +605,16 @@ int main ()
                     // Parse HTTP request
                     if (parser.parse_request (conn.buffer))
                     {
-                        handle_http_request (conn, parser);
+                        handle_http_request (conn, parser, epoll_fd);
 
-                        if (!conn.keep_alive)
+                        if (!conn.keep_alive && conn.send_buffer.empty())
                         {
-                            // Close connection if not keep-alive
+                            // اگر keep-alive نیست و چیزی برای ارسال نمانده، اتصال را ببند
                             close_connection (epoll_fd, conn);
                             connections.erase (client_fd);
                             parsers.erase (client_fd);
                         }
-                        else
+                        else if (conn.send_buffer.empty())
                         {
                             // Reset for next request
                             conn.buffer.clear ();
