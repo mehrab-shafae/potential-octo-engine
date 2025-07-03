@@ -8,7 +8,12 @@ This document is a supplement and customization of the official [NASA JPL C Codi
 - In any case of ambiguity or silence in this document, the JPL standard is the primary reference.
 - Sections that are specific to C++20 or Aspire customization are explicitly marked as such.
 
+**MANDATORY COMPLIANCE:**  
+All contributors, reviewers, and automated systems are required to adhere strictly to every rule, guideline, and example provided in this document. No deviation, omission, or alternative interpretation is permitted. The standards, conventions, and requirements set forth herein are exhaustive and binding for all aspects of the Aspire project.
+
 ## General Language and Professionalism
+
+All contributions to the Aspire project—including code, comments, documentation, commit messages, log messages, and user-facing text—must conform precisely to the standards, conventions, and tone established in this document. Any content that does not fully align with these requirements is unacceptable and will be rejected.
 
 All contributions to the Aspire project must adhere to the following language and professionalism standards:
 
