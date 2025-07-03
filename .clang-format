@@ -1,8 +1,8 @@
 BasedOnStyle: Google
 IndentWidth: 4
-TabWidth: 4
+TabWidth: 8
 UseTab: Never
-ColumnLimit: 300
+ColumnLimit: 80
 AllowShortFunctionsOnASingleLine: Inline
 BreakBeforeBraces: Allman
 SpacesInParentheses: false
