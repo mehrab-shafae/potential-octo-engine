@@ -1,3 +1,12 @@
+/*
+ * IMPORTANT: All development of this file and ANY file in this project
+ * (including headers and sources) MUST strictly comply with the rules and
+ * standards defined in doc/rules.md. No exceptions are allowed. This notice
+ * MUST appear at the top of EVERY file, without exception, to remind all
+ * contributors.
+ *
+ * Aspire Project Signature: 2025-07-03T16:39:16+03:30
+ */
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -47,12 +56,12 @@ void set_nonblocking(int sock)
     int flags = fcntl(sock, F_GETFL, 0);
     if(flags == -1)
     {
-        Logger::instance().error("fcntl F_GETFL failed");
+        Logger::instance().error_log("fcntl F_GETFL failed");
         return;
     }
     if(fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1)
     {
-        Logger::instance().error("fcntl F_SETFL failed");
+        Logger::instance().error_log("fcntl F_SETFL failed");
     }
 }
 
@@ -62,7 +71,7 @@ int create_server_socket()
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if(sock == -1)
     {
-        Logger::instance().error("Socket creation failed");
+        Logger::instance().error_log("Socket creation failed");
         exit(1);
     }
 
@@ -70,27 +79,27 @@ int create_server_socket()
     int opt = 1;
     if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
     {
-        Logger::instance().error("setsockopt SO_REUSEADDR failed");
+        Logger::instance().error_log("setsockopt SO_REUSEADDR failed");
     }
     // --- اضافه کردن SO_REUSEPORT برای multi-process ---
     if(setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
     {
-        Logger::instance().error("setsockopt SO_REUSEPORT failed");
+        Logger::instance().error_log("setsockopt SO_REUSEPORT failed");
     }
     // Set large receive/send buffer (1MB)
     int rcvbuf = 1 << 20;
     int sndbuf = 1 << 20;
     if(setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0)
     {
-        Logger::instance().error("setsockopt SO_RCVBUF failed");
+        Logger::instance().error_log("setsockopt SO_RCVBUF failed");
     }
     if(setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
     {
-        Logger::instance().error("setsockopt SO_SNDBUF failed");
+        Logger::instance().error_log("setsockopt SO_SNDBUF failed");
     }
 
     set_nonblocking(sock);
-    Logger::instance().info("Socket created");
+    Logger::instance().info_log("Socket created");
     return sock;
 }
 
@@ -99,11 +108,11 @@ void bind_socket(int sock, sockaddr_in* addr)
 {
     if(bind(sock, reinterpret_cast<struct sockaddr*>(addr), sizeof(*addr)) < 0)
     {
-        Logger::instance().error("Bind failed");
+        Logger::instance().error_log("Bind failed");
         close(sock);
         exit(1);
     }
-    Logger::instance().info("Socket bound to port");
+    Logger::instance().info_log("Socket bound to port");
 }
 
 // --- تابع گوش دادن برای اتصال کلاینت‌ها ---
@@ -111,11 +120,11 @@ void listen_socket(int sock, int backlog)
 {
     if(listen(sock, backlog) < 0)
     {
-        Logger::instance().error("Listen failed");
+        Logger::instance().error_log("Listen failed");
         close(sock);
         exit(1);
     }
-    Logger::instance().info("Listening for clients...");
+    Logger::instance().info_log("Listening for clients...");
 }
 
 // --- تابع بستن اتصال ---
@@ -123,7 +132,8 @@ void close_connection(int epoll_fd, Connection& conn)
 {
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn.fd(), nullptr);
     close(conn.fd());
-    Logger::instance().info("Connection closed: " + std::to_string(conn.fd()));
+    Logger::instance().info_log("Connection closed: " +
+                                std::to_string(conn.fd()));
 }
 
 // --- تابع پاکسازی اتصال‌های timeout شده ---
@@ -145,8 +155,8 @@ void cleanup_timeout_connections(
     {
         close_connection(epoll_fd, *connections[ fd ]);
         connections.erase(fd);
-        Logger::instance().info("Timeout connection removed: " +
-                                std::to_string(fd));
+        Logger::instance().info_log("Timeout connection removed: " +
+                                    std::to_string(fd));
     }
 }
 
@@ -159,7 +169,7 @@ void handle_signal(int signum)
 {
     (void)signum;  // جلوگیری از هشدار unused parameter
     stop_server = 1;
-    Logger::instance().info("Graceful shutdown signal received");
+    Logger::instance().info_log("Graceful shutdown signal received");
 }
 
 // --- سیگنال هندلر برای SIGCHLD (جلوگیری از zombie process) ---
@@ -175,7 +185,7 @@ void handle_sigusr1(int signum)
 {
     (void)signum;
     reload_server = 1;
-    Logger::instance().info("Hot reload signal (SIGUSR1) received");
+    Logger::instance().info_log("Hot reload signal (SIGUSR1) received");
 }
 
 int main()
@@ -186,7 +196,7 @@ int main()
     rl.rlim_max = 4096;
     if(setrlimit(RLIMIT_NOFILE, &rl) != 0)
     {
-        Logger::instance().error("setrlimit RLIMIT_NOFILE failed");
+        Logger::instance().error_log("setrlimit RLIMIT_NOFILE failed");
     }
     // Ignore SIGPIPE globally
     signal(SIGPIPE, SIG_IGN);
@@ -216,8 +226,8 @@ int main()
 
     // --- گوش دادن برای اتصال کلاینت‌ها ---
     listen_socket(server_socket, BACKLOG);
-    Logger::instance().info("Server is running on port " +
-                            std::to_string(PORT));
+    Logger::instance().info_log("Server is running on port " +
+                                std::to_string(PORT));
 
     // --- Multi-process: ایجاد چندین process با fork ---
     constexpr int NUM_PROCESSES = 4;  // تعداد processها (برای تست ۴ کافی است)
@@ -226,7 +236,7 @@ int main()
         pid_t pid = fork();
         if(pid < 0)
         {
-            Logger::instance().error("fork failed");
+            Logger::instance().error_log("fork failed");
             exit(1);
         }
         if(pid == 0)
@@ -244,7 +254,7 @@ int main()
     int epoll_fd = epoll_create1(0);
     if(epoll_fd == -1)
     {
-        Logger::instance().error("epoll_create1 failed");
+        Logger::instance().error_log("epoll_create1 failed");
         close(server_socket);
         exit(1);
     }
@@ -259,7 +269,7 @@ int main()
     ev.data.fd = server_socket;
     if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_socket, &ev) == -1)
     {
-        Logger::instance().error("epoll_ctl: server_socket");
+        Logger::instance().error_log("epoll_ctl: server_socket");
         close(server_socket);
         close(epoll_fd);
         exit(1);
@@ -282,7 +292,7 @@ int main()
             {
                 continue;  // Interrupted by signal
             }
-            Logger::instance().error("epoll_wait failed");
+            Logger::instance().error_log("epoll_wait failed");
             break;
         }
 
@@ -324,9 +334,9 @@ int main()
                 if(client_socket >= 0)
                 {
                     // --- بررسی محدودیت تعداد اتصال ---
-                    if((int)connections.size() >= MAX_CONNECTIONS)
+                    if(static_cast<int>(connections.size()) >= MAX_CONNECTIONS)
                     {
-                        Logger::instance().error(
+                        Logger::instance().error_log(
                             "Connection limit reached, "
                             "closing new client: " +
                             std::to_string(client_socket));
@@ -340,14 +350,14 @@ int main()
                     if(setsockopt(client_socket, SOL_SOCKET, SO_RCVBUF, &rcvbuf,
                                   sizeof(rcvbuf)) < 0)
                     {
-                        Logger::instance().error(
+                        Logger::instance().error_log(
                             "setsockopt SO_RCVBUF "
                             "(client) failed");
                     }
                     if(setsockopt(client_socket, SOL_SOCKET, SO_SNDBUF, &sndbuf,
                                   sizeof(sndbuf)) < 0)
                     {
-                        Logger::instance().error(
+                        Logger::instance().error_log(
                             "setsockopt SO_SNDBUF "
                             "(client) failed");
                     }
@@ -360,7 +370,8 @@ int main()
                     if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket,
                                  &client_ev) == -1)
                     {
-                        Logger::instance().error("epoll_ctl: client_socket");
+                        Logger::instance().error_log(
+                            "epoll_ctl: client_socket");
                         close(client_socket);
                     }
                     else
@@ -368,11 +379,12 @@ int main()
                         connections[ client_socket ] =
                             std::make_unique<Connection>(client_socket);
                         parsers[ client_socket ] = HttpParser();
-                        Logger::instance().info("Client connected: " +
-                                                std::to_string(client_socket));
+                        Logger::instance().info_log(
+                            "Client connected: " +
+                            std::to_string(client_socket));
                     }
                 }
-                else { Logger::instance().error("Accept failed"); }
+                else { Logger::instance().error_log("Accept failed"); }
             }
             else
             {
@@ -396,8 +408,9 @@ int main()
                     close_connection(epoll_fd, conn);
                     connections.erase(client_fd);
                     parsers.erase(client_fd);
-                    Logger::instance().info("Client disconnected (RDHUP): " +
-                                            std::to_string(client_fd));
+                    Logger::instance().info_log(
+                        "Client disconnected (RDHUP): " +
+                        std::to_string(client_fd));
                     continue;
                 }
                 // خواندن داده در حالت EPOLLET: تا جایی که
@@ -420,7 +433,7 @@ int main()
                             close_connection(epoll_fd, conn);
                             connections.erase(client_fd);
                             parsers.erase(client_fd);
-                            Logger::instance().info(
+                            Logger::instance().info_log(
                                 "Client "
                                 "disconnected: " +
                                 std::to_string(client_fd));
@@ -443,7 +456,8 @@ int main()
                     if(parser_tmp.parse_request(conn.buffer()))
                     {
                         // --- محدودیت pipeline ---
-                        if((int)conn.request_queue().size() >= MAX_PIPELINE)
+                        if(static_cast<int>(conn.request_queue().size()) >=
+                           MAX_PIPELINE)
                         {
                             std::string err_resp =
                                 build_http_response(429, "text/plain",
@@ -453,7 +467,7 @@ int main()
                                                     false);
                             conn.response_queue().push(err_resp);
                             conn.keep_alive() = false;
-                            Logger::instance().error(
+                            Logger::instance().error_log(
                                 "Pipeline "
                                 "limit "
                                 "exceeded for "
@@ -510,12 +524,12 @@ int main()
                 {
                     HttpParser& parser_in_queue = conn.request_queue().front();
                     bool        keep_alive = false, is_chunked_stream = false;
+                    std::string response;
                     // --- Access Log: شروع زمان ---
-                    auto        t_start  = std::chrono::steady_clock::now();
-                    std::string response = handle_http_request(
-                        parser_in_queue, keep_alive, is_chunked_stream, &conn);
-                    // --- Access Log: پایان زمان و ثبت لاگ
-                    // ---
+                    auto t_start = std::chrono::steady_clock::now();
+                    handle_http_request(parser_in_queue, keep_alive,
+                                        is_chunked_stream, response, &conn);
+                    // --- Access Log: پایان زمان و ثبت لاگ ---
                     auto t_end = std::chrono::steady_clock::now();
                     auto duration_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -542,9 +556,6 @@ int main()
                     conn.keep_alive() = keep_alive;
                     if(is_chunked_stream)
                     {
-                        // شروع stream: فقط هدر را queue
-                        // کن، بقیه chunkها را در
-                        // EPOLLOUT مدیریت کن
                         conn.response_queue().push(response);
                         conn.chunked_streaming() = true;
                         conn.stream_chunk_idx()  = 1;
@@ -651,7 +662,8 @@ int main()
     }
 
     // --- شروع graceful shutdown: بستن همه منابع و اتصالات ---
-    Logger::instance().info("Shutting down server, closing all connections...");
+    Logger::instance().info_log(
+        "Shutting down server, closing all connections...");
     for(auto& pair : connections)
     {
         // Connection destructor will close fd
@@ -663,31 +675,32 @@ int main()
     // اگر سیگنال reload دریافت شد، process جدید fork کن
     if(reload_server)
     {
-        Logger::instance().info("Forking new process for hot reload...");
+        Logger::instance().info_log("Forking new process for hot reload...");
         pid_t pid = fork();
         if(pid == 0)
         {
             // Child: اجرای مجدد main (با همان socket)
             // execv برای جایگزینی کامل process (در اینجا فقط main
             // را دوباره اجرا می‌کنیم)
-            char* argv[] = {(char*)"./aspire", nullptr};
+            char* argv[] = {const_cast<char*>("./aspire"), nullptr};
             execv(argv[ 0 ], argv);
             // اگر execv شکست خورد:
-            Logger::instance().error("execv failed for hot reload");
+            Logger::instance().error_log("execv failed for hot reload");
             exit(1);
         }
         else if(pid > 0)
         {
-            Logger::instance().info("New process forked for hot reload (pid=" +
-                                    std::to_string(pid) + ")");
+            Logger::instance().info_log(
+                "New process forked for hot reload (pid=" +
+                std::to_string(pid) + ")");
         }
-        else { Logger::instance().error("fork failed for hot reload"); }
+        else { Logger::instance().error_log("fork failed for hot reload"); }
     }
 
 // اگر parent process هستیم، منتظر پایان همه childها بمانیم
 #ifdef MULTI_PROCESS
     while(waitpid(-1, nullptr, WNOHANG) > 0) {}
 #endif
-    Logger::instance().info("Server exited gracefully.");
+    Logger::instance().info_log("Server exited gracefully.");
     return 0;
 }

@@ -1,106 +1,115 @@
+/*
+ * IMPORTANT: All development of this file and ANY file in this project
+ * (including headers and sources) MUST strictly comply with the rules and
+ * standards defined in doc/rules.md. No exceptions are allowed. This notice
+ * MUST appear at the top of EVERY file, without exception, to remind all
+ * contributors.
+ *
+ * Aspire Project Signature: 2025-07-03T16:39:16+03:30
+ */
 #include "Connection.hpp"
 
 #include <unistd.h>
 
 Connection::Connection(int socket_fd)
-    : m_fd(socket_fd), m_last_activity(time(nullptr)), m_keep_alive(false)
+    : fd_(socket_fd), last_activity_(time(nullptr)), keep_alive_(false)
 {
 }
 
 Connection::~Connection()
 {
-    if(m_fd != -1)
+    if(fd_ != -1)
     {
-        close(m_fd);
-        m_fd = -1;
+        close(fd_);
+        fd_ = -1;
     }
 }
 
 Connection::Connection(Connection&& other) noexcept
 {
-    m_fd                = other.m_fd;
-    m_buffer            = std::move(other.m_buffer);
-    m_send_buffer       = std::move(other.m_send_buffer);
-    m_last_activity     = other.m_last_activity;
-    m_keep_alive        = other.m_keep_alive;
-    m_request_queue     = std::move(other.m_request_queue);
-    m_response_queue    = std::move(other.m_response_queue);
-    m_chunked_streaming = other.m_chunked_streaming;
-    m_stream_chunk_idx  = other.m_stream_chunk_idx;
-    m_last_stream_time  = other.m_last_stream_time;
-    other.m_fd          = -1;
+    fd_                = other.fd_;
+    buffer_            = std::move(other.buffer_);
+    send_buffer_       = std::move(other.send_buffer_);
+    last_activity_     = other.last_activity_;
+    keep_alive_        = other.keep_alive_;
+    request_queue_     = std::move(other.request_queue_);
+    response_queue_    = std::move(other.response_queue_);
+    chunked_streaming_ = other.chunked_streaming_;
+    stream_chunk_idx_  = other.stream_chunk_idx_;
+    last_stream_time_  = other.last_stream_time_;
+    other.fd_          = -1;
 }
 
 Connection& Connection::operator=(Connection&& other) noexcept
 {
     if(this != &other)
     {
-        if(m_fd != -1) close(m_fd);
-        m_fd                = other.m_fd;
-        m_buffer            = std::move(other.m_buffer);
-        m_send_buffer       = std::move(other.m_send_buffer);
-        m_last_activity     = other.m_last_activity;
-        m_keep_alive        = other.m_keep_alive;
-        m_request_queue     = std::move(other.m_request_queue);
-        m_response_queue    = std::move(other.m_response_queue);
-        m_chunked_streaming = other.m_chunked_streaming;
-        m_stream_chunk_idx  = other.m_stream_chunk_idx;
-        m_last_stream_time  = other.m_last_stream_time;
-        other.m_fd          = -1;
+        if(fd_ != -1) close(fd_);
+        fd_                = other.fd_;
+        buffer_            = std::move(other.buffer_);
+        send_buffer_       = std::move(other.send_buffer_);
+        last_activity_     = other.last_activity_;
+        keep_alive_        = other.keep_alive_;
+        request_queue_     = std::move(other.request_queue_);
+        response_queue_    = std::move(other.response_queue_);
+        chunked_streaming_ = other.chunked_streaming_;
+        stream_chunk_idx_  = other.stream_chunk_idx_;
+        last_stream_time_  = other.last_stream_time_;
+        other.fd_          = -1;
     }
     return *this;
 }
 
 int Connection::fd() const
 {
-    return m_fd;
+    return fd_;
 }
 std::string& Connection::buffer()
 {
-    return m_buffer;
+    return buffer_;
 }
 std::string& Connection::send_buffer()
 {
-    return m_send_buffer;
+    return send_buffer_;
 }
 time_t& Connection::last_activity()
 {
-    return m_last_activity;
+    return last_activity_;
 }
 bool& Connection::keep_alive()
 {
-    return m_keep_alive;
+    return keep_alive_;
 }
 std::queue<HttpParser>& Connection::request_queue()
 {
-    return m_request_queue;
+    return request_queue_;
 }
 std::queue<std::string>& Connection::response_queue()
 {
-    return m_response_queue;
+    return response_queue_;
 }
 bool& Connection::chunked_streaming()
 {
-    return m_chunked_streaming;
+    return chunked_streaming_;
 }
 int& Connection::stream_chunk_idx()
 {
-    return m_stream_chunk_idx;
+    return stream_chunk_idx_;
 }
 time_t& Connection::last_stream_time()
 {
-    return m_last_stream_time;
+    return last_stream_time_;
 }
 
 void Connection::reset()
 {
-    m_buffer.clear();
-    m_send_buffer.clear();
-    m_last_activity = time(nullptr);
-    m_keep_alive    = false;
-    while(!m_request_queue.empty()) m_request_queue.pop();
-    while(!m_response_queue.empty()) m_response_queue.pop();
-    m_chunked_streaming = false;
-    m_stream_chunk_idx  = 0;
-    m_last_stream_time  = 0;
+    buffer_.clear();
+    send_buffer_.clear();
+    last_activity_ = time(nullptr);
+    keep_alive_    = false;
+    while(!request_queue_.empty()) request_queue_.pop();
+    while(!response_queue_.empty()) response_queue_.pop();
+    chunked_streaming_ = false;
+    stream_chunk_idx_  = 0;
+    last_stream_time_  = 0;
 }

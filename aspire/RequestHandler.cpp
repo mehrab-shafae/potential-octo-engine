@@ -1,3 +1,12 @@
+/*
+ * IMPORTANT: All development of this file and ANY file in this project
+ * (including headers and sources) MUST strictly comply with the rules and
+ * standards defined in doc/rules.md. No exceptions are allowed. This notice
+ * MUST appear at the top of EVERY file, without exception, to remind all
+ * contributors.
+ *
+ * Aspire Project Signature: 2025-07-03T16:39:16+03:30
+ */
 #include "RequestHandler.hpp"
 
 #include <ctime>
@@ -56,8 +65,10 @@ std::string build_chunk(std::string_view data)
 
 const std::string end_chunk = "0\r\n\r\n";
 
-std::string handle_http_request(const HttpParser& parser, bool& keep_alive,
-                                bool& is_chunked_stream, Connection* conn)
+HttpResponseStatus handle_http_request(const HttpParser& parser,
+                                       bool&             keep_alive,
+                                       bool&             is_chunked_stream,
+                                       std::string& response, Connection* conn)
 {
     const std::string& method  = parser.get_method();
     const std::string& path    = parser.get_path();
@@ -79,27 +90,31 @@ std::string handle_http_request(const HttpParser& parser, bool& keep_alive,
                 std::to_string(time(nullptr)) +
                 "</p>"
                 "</body></html>";
-            return build_http_response(200, "text/html", body, keep_alive);
+            response = build_http_response(200, "text/html", body, keep_alive);
+            return HttpResponseStatus::OK;
         }
         else if(path == "/api/status")
         {
             std::string body =
                 "{\"status\": \"running\", \"server\": "
                 "\"modular-epoll\"}";
-            return build_http_response(200, "application/json", body,
-                                       keep_alive);
+            response =
+                build_http_response(200, "application/json", body, keep_alive);
+            return HttpResponseStatus::OK;
         }
         else if(path == "/api/stream")
         {
             is_chunked_stream = true;
             if(conn) conn->chunked_streaming() = true;
-            return build_chunked_header(keep_alive);
+            response = build_chunked_header(keep_alive);
+            return HttpResponseStatus::OK;
         }
         else
         {
             std::string body =
                 "<html><body><h1>404 Not Found</h1></body></html>";
-            return build_http_response(404, "text/html", body, keep_alive);
+            response = build_http_response(404, "text/html", body, keep_alive);
+            return HttpResponseStatus::NotFound;
         }
     }
     else if(method == "POST")
@@ -108,20 +123,23 @@ std::string handle_http_request(const HttpParser& parser, bool& keep_alive,
         {
             std::string body =
                 "{\"message\": \"Echo: " + parser.get_body() + "\"}";
-            return build_http_response(200, "application/json", body,
-                                       keep_alive);
+            response =
+                build_http_response(200, "application/json", body, keep_alive);
+            return HttpResponseStatus::OK;
         }
         else
         {
             std::string body =
                 "<html><body><h1>404 Not Found</h1></body></html>";
-            return build_http_response(404, "text/html", body, keep_alive);
+            response = build_http_response(404, "text/html", body, keep_alive);
+            return HttpResponseStatus::NotFound;
         }
     }
     else
     {
         std::string body =
             "<html><body><h1>405 Method Not Allowed</h1></body></html>";
-        return build_http_response(405, "text/html", body, keep_alive);
+        response = build_http_response(405, "text/html", body, keep_alive);
+        return HttpResponseStatus::MethodNotAllowed;
     }
 }

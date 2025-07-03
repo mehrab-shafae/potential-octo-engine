@@ -1,9 +1,18 @@
+/*
+ * IMPORTANT: All development of this file and ANY file in this project
+ * (including headers and sources) MUST strictly comply with the rules and
+ * standards defined in doc/rules.md. No exceptions are allowed. This notice
+ * MUST appear at the top of EVERY file, without exception, to remind all
+ * contributors.
+ *
+ * Aspire Project Signature: 2025-07-03T16:39:16+03:30
+ */
 #include "HttpParser.hpp"
 
 #include <algorithm>
 #include <vector>
 
-HttpParser::HttpParser() : parsing_complete(false) {}
+HttpParser::HttpParser() : parsing_complete_(false) {}
 
 bool HttpParser::parse_request(std::string_view data)
 {
@@ -27,44 +36,44 @@ bool HttpParser::parse_request(std::string_view data)
         if(!parse_header(header_line)) return false;
         pos = line_end + 2;
     }
-    if(pos < data.length()) body = std::string(data.substr(pos));
-    parsing_complete = true;
+    if(pos < data.length()) body_ = std::string(data.substr(pos));
+    parsing_complete_ = true;
     return true;
 }
 
 void HttpParser::reset()
 {
-    method.clear();
-    path.clear();
-    version.clear();
-    headers.clear();
-    body.clear();
-    parsing_complete = false;
+    method_.clear();
+    path_.clear();
+    version_.clear();
+    headers_.clear();
+    body_.clear();
+    parsing_complete_ = false;
 }
 
 const std::string& HttpParser::get_method() const
 {
-    return method;
+    return method_;
 }
 const std::string& HttpParser::get_path() const
 {
-    return path;
+    return path_;
 }
 const std::string& HttpParser::get_version() const
 {
-    return version;
+    return version_;
 }
 const std::map<std::string, std::string>& HttpParser::get_headers() const
 {
-    return headers;
+    return headers_;
 }
 const std::string& HttpParser::get_body() const
 {
-    return body;
+    return body_;
 }
 bool HttpParser::is_complete() const
 {
-    return parsing_complete;
+    return parsing_complete_;
 }
 
 bool HttpParser::parse_request_line(std::string_view line)
@@ -79,9 +88,9 @@ bool HttpParser::parse_request_line(std::string_view line)
         end   = line.find(' ', start);
     }
     if(parts.size() < 2) return false;
-    method  = parts[ 0 ];
-    path    = parts[ 1 ];
-    version = (parts.size() > 2) ? parts[ 2 ] : "HTTP/1.0";
+    method_  = parts[ 0 ];
+    path_    = parts[ 1 ];
+    version_ = (parts.size() > 2) ? parts[ 2 ] : "HTTP/1.0";
     return true;
 }
 
@@ -93,6 +102,6 @@ bool HttpParser::parse_header(std::string_view line)
     std::string_view value_sv = line.substr(colon_pos + 1);
     value_sv.remove_prefix(
         std::min(value_sv.find_first_not_of(" \t"), value_sv.size()));
-    headers[ key ] = std::string(value_sv);
+    headers_[ key ] = std::string(value_sv);
     return true;
 }
