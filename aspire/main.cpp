@@ -8,6 +8,8 @@
 #include <sys/wait.h>
 #include <thread> // برای sleep
 #include <queue> // برای صف درخواست و پاسخ
+#include <sys/resource.h> // برای setrlimit
+#include <chrono> // برای اندازه‌گیری مدت زمان پردازش
 
 #include <algorithm>
 #include <cstring>
@@ -33,6 +35,10 @@ constexpr int BUFFER_SIZE        = 4096;  // اندازه بافر برای خو
 constexpr int MAX_EVENTS         = 100;   // حداکثر رویدادهای epoll در هر بار انتظار
 constexpr int CONNECTION_TIMEOUT = 30;    // timeout اتصال (ثانیه)
 constexpr int MAX_HEADERS        = 50;    // حداکثر تعداد header ها
+// --- محدودیت منابع ---
+constexpr int MAX_CONNECTIONS    = 1024;  // حداکثر تعداد اتصال همزمان
+// --- محدودیت pipeline ---
+constexpr int MAX_PIPELINE       = 10;    // حداکثر تعداد درخواست pipelined در هر اتصال
 
 // --- تابع تنظیم non-blocking mode ---
 void set_nonblocking (int sock)
@@ -141,6 +147,7 @@ void cleanup_timeout_connections (int epoll_fd, std::map<int, std::unique_ptr<Co
 
 // --- فلگ سراسری برای graceful shutdown ---
 volatile sig_atomic_t stop_server = 0;
+volatile sig_atomic_t reload_server = 0;
 
 // --- سیگنال هندلر برای SIGINT و SIGTERM ---
 void handle_signal(int signum) {
@@ -149,13 +156,42 @@ void handle_signal(int signum) {
     Logger::instance().info("Graceful shutdown signal received");
 }
 
+// --- سیگنال هندلر برای SIGCHLD (جلوگیری از zombie process) ---
+void handle_sigchld(int signum) {
+    (void)signum;
+    // جمع‌آوری همه zombieها بدون بلاک شدن
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {}
+}
+
+// --- سیگنال هندلر برای SIGUSR1 (Hot Reload/Restart) ---
+void handle_sigusr1(int signum) {
+    (void)signum;
+    reload_server = 1;
+    Logger::instance().info("Hot reload signal (SIGUSR1) received");
+}
+
 int main ()
 {
+    // --- محدودیت تعداد فایل دیسکریپتورهای باز ---
+    struct rlimit rl;
+    rl.rlim_cur = 4096;
+    rl.rlim_max = 4096;
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        Logger::instance().error("setrlimit RLIMIT_NOFILE failed");
+    }
     // Ignore SIGPIPE globally
     signal(SIGPIPE, SIG_IGN);
     // --- ثبت سیگنال هندلر برای graceful shutdown ---
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+    // --- ثبت سیگنال هندلر برای SIGCHLD ---
+    struct sigaction sa_chld;
+    sa_chld.sa_handler = handle_sigchld;
+    sigemptyset(&sa_chld.sa_mask);
+    sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa_chld, nullptr);
+    // --- ثبت سیگنال هندلر برای SIGUSR1 (Hot Reload) ---
+    signal(SIGUSR1, handle_sigusr1);
     // --- ساخت سوکت سرور ---
     int server_socket = create_server_socket ();
 
@@ -203,7 +239,7 @@ int main ()
 #if defined(EPOLLEXCLUSIVE)
     ev.events  = EPOLLIN | EPOLLEXCLUSIVE; // فقط برای سرور سوکت
 #else
-    ev.events  = EPOLLIN;
+    ev.events  = EPOLLIN | EPOLLRDHUP;
 #endif
     ev.data.fd = server_socket;
     if (epoll_ctl (epoll_fd, EPOLL_CTL_ADD, server_socket, &ev) == -1)
@@ -220,7 +256,7 @@ int main ()
     epoll_event               events[ MAX_EVENTS ];
 
     // --- حلقه اصلی سرور با epoll ---
-    while (!stop_server) // اگر سیگنال shutdown آمد، حلقه متوقف می‌شود
+    while (!stop_server && !reload_server) // اگر سیگنال shutdown یا reload آمد، حلقه متوقف می‌شود
     {
         int nfds = epoll_wait (epoll_fd, events, MAX_EVENTS, 50);  // 50ms: تعادل latency و مصرف CPU
         if (nfds == -1)
@@ -264,6 +300,12 @@ int main ()
                 #endif
                 if (client_socket >= 0)
                 {
+                    // --- بررسی محدودیت تعداد اتصال ---
+                    if ((int)connections.size() >= MAX_CONNECTIONS) {
+                        Logger::instance().error("Connection limit reached, closing new client: " + std::to_string(client_socket));
+                        close(client_socket);
+                        continue;
+                    }
                     // Set large receive/send buffer (1MB) for client
                     int rcvbuf = 1 << 20;
                     int sndbuf = 1 << 20;
@@ -275,7 +317,7 @@ int main ()
                     }
                     // اضافه کردن کلاینت به epoll
                     epoll_event client_ev;
-                    client_ev.events  = EPOLLIN | EPOLLET;  // Edge triggered
+                    client_ev.events  = EPOLLIN | EPOLLET | EPOLLRDHUP;  // Edge triggered + تشخیص قطع اتصال
                     client_ev.data.fd = client_socket;
                     if (epoll_ctl (epoll_fd, EPOLL_CTL_ADD, client_socket, &client_ev) == -1)
                     {
@@ -309,6 +351,14 @@ int main ()
                 // حذف parser_in_map چون دیگر استفاده نمی‌شود
                 // HttpParser& parser_in_map = parser_it->second;
 
+                // اگر EPOLLRDHUP فعال شد یا کلاینت قطع شد
+                if (events[n].events & EPOLLRDHUP) {
+                    close_connection(epoll_fd, conn);
+                    connections.erase(client_fd);
+                    parsers.erase(client_fd);
+                    Logger::instance().info("Client disconnected (RDHUP): " + std::to_string(client_fd));
+                    continue;
+                }
                 // خواندن داده در حالت EPOLLET: تا جایی که می‌شود بخوان (برای جلوگیری از wakeup بیهوده)
                 bool client_closed = false;
                 while (true) {
@@ -335,6 +385,14 @@ int main ()
                 while (true) {
                     HttpParser parser_tmp;
                     if (parser_tmp.parse_request(conn.buffer())) {
+                        // --- محدودیت pipeline ---
+                        if ((int)conn.request_queue().size() >= MAX_PIPELINE) {
+                            std::string err_resp = build_http_response(429, "text/plain", "Too Many Pipelined Requests", false);
+                            conn.response_queue().push(err_resp);
+                            conn.keep_alive() = false;
+                            Logger::instance().error("Pipeline limit exceeded for client: " + std::to_string(client_fd));
+                            break;
+                        }
                         conn.request_queue().push(parser_tmp);
                         // حذف داده مصرف‌شده از بافر
                         size_t req_len = conn.buffer().find("\r\n\r\n");
@@ -367,7 +425,27 @@ int main ()
                 while (!conn.request_queue().empty()) {
                     HttpParser& parser_in_queue = conn.request_queue().front();
                     bool keep_alive = false, is_chunked_stream = false;
+                    // --- Access Log: شروع زمان ---
+                    auto t_start = std::chrono::steady_clock::now();
                     std::string response = handle_http_request(parser_in_queue, keep_alive, is_chunked_stream, &conn);
+                    // --- Access Log: پایان زمان و ثبت لاگ ---
+                    auto t_end = std::chrono::steady_clock::now();
+                    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
+                    // استخراج status code از response
+                    int status_code = 0;
+                    size_t pos = response.find(' ');
+                    if (pos != std::string::npos) {
+                        size_t pos2 = response.find(' ', pos + 1);
+                        if (pos2 != std::string::npos) {
+                            status_code = std::stoi(response.substr(pos + 1, pos2 - pos - 1));
+                        }
+                    }
+                    std::string log_line =
+                        parser_in_queue.get_method() + " " +
+                        parser_in_queue.get_path() + " " +
+                        std::to_string(status_code) + " " +
+                        std::to_string(duration_ms) + "ms fd=" + std::to_string(client_fd);
+                    Logger::instance().access_log(log_line);
                     conn.keep_alive() = keep_alive;
                     if (is_chunked_stream) {
                         // شروع stream: فقط هدر را queue کن، بقیه chunkها را در EPOLLOUT مدیریت کن
@@ -450,6 +528,25 @@ int main ()
     }
     close (server_socket);
     close (epoll_fd);
+
+    // اگر سیگنال reload دریافت شد، process جدید fork کن
+    if (reload_server) {
+        Logger::instance().info("Forking new process for hot reload...");
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child: اجرای مجدد main (با همان socket)
+            // execv برای جایگزینی کامل process (در اینجا فقط main را دوباره اجرا می‌کنیم)
+            char* argv[] = { (char*)"./aspire", nullptr };
+            execv(argv[0], argv);
+            // اگر execv شکست خورد:
+            Logger::instance().error("execv failed for hot reload");
+            exit(1);
+        } else if (pid > 0) {
+            Logger::instance().info("New process forked for hot reload (pid=" + std::to_string(pid) + ")");
+        } else {
+            Logger::instance().error("fork failed for hot reload");
+        }
+    }
 
     // اگر parent process هستیم، منتظر پایان همه childها بمانیم
     #ifdef MULTI_PROCESS
