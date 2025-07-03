@@ -1,5 +1,22 @@
 # Aspire C++ Coding Rules and Principles
 
+## General Language and Professionalism
+
+All contributions to the Aspire project must adhere to the following language and professionalism standards:
+
+- **Language:** All code, comments, documentation, commit messages, log messages, and user-facing text must be written in clear, simple, and formal English. The use of other languages is strictly prohibited.
+- **Professionalism:** All identifiers (class names, function names, variables, etc.), comments, and documentation must maintain a professional and organizational tone. The following are strictly forbidden:
+    - Jokes, humor, or informal remarks in any part of the codebase or documentation.
+    - Slang, colloquial expressions, or abbreviations that are not universally recognized in the software engineering field.
+    - Non-English words, phrases, or sentences.
+    - Emojis, emoticons, or other non-standard symbols.
+    - Unprofessional, unclear, or playful naming for any code element.
+- **Clarity:** All written content must be unambiguous and easy to understand for an international, professional audience. If a term or abbreviation is not universally recognized, it must be clearly defined.
+
+Any violation of these standards will be considered a breach of project policy and must be corrected immediately. These rules are intended to ensure the Aspire project maintains the highest standards of clarity, professionalism, and organizational integrity.
+
+---
+
 ## Project Scope and Platform Constraints
 
 All code in the Aspire project shall strictly adhere to the following constraints:
@@ -322,6 +339,25 @@ private:
 ```
 
 ---
+
+## Naming Conventions
+
+All code in the Aspire project must follow these naming conventions:
+
+- **Variables and Functions:** Use `lower_case_with_underscores` for all variable and function names (e.g., `sensor_value`, `read_data()`).
+- **Classes and Structs:** Use `UpperCamelCase` for all class and struct names (e.g., `RequestHandler`, `SensorData`).
+
+These conventions are mandatory and help ensure consistency, clarity, and professionalism throughout the codebase.
+
+## Line Length Limit
+
+- No line of code, comment, or documentation shall exceed 80 characters in length. This ensures readability and consistency across all environments and tools.
+
+---
+
+## Review and Tooling
+
+- Each small change (commit or pull request) should have a maximum diff of 20 lines. This encourages incremental, reviewable changes and helps maintain code quality.
 
 ## Conclusion
 
