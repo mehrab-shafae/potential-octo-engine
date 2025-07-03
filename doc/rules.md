@@ -1,5 +1,13 @@
 # Aspire C++ Coding Rules and Principles
 
+## Relationship to NASA JPL C Coding Standard
+
+This document is a supplement and customization of the official [NASA JPL C Coding Standard] for the Aspire project and C++20.
+
+- All rules and principles of the JPL standard must be followed, except where specifically modified or extended in this document for C++20 or Aspire project requirements.
+- In any case of ambiguity or silence in this document, the JPL standard is the primary reference.
+- Sections that are specific to C++20 or Aspire customization are explicitly marked as such.
+
 ## General Language and Professionalism
 
 All contributions to the Aspire project must adhere to the following language and professionalism standards:
@@ -44,6 +52,7 @@ This document establishes the official coding rules and principles for the Aspir
 ## 1. Class Structure and Usage
 
 ### Rule 1.1: Classes Shall Be Simple and Focused
+*Aspired Customization*
 A class shall encapsulate a single, well-defined responsibility. Classes with multiple, unrelated responsibilities are forbidden.
 
 **Example (Compliant):**
@@ -73,6 +82,7 @@ public:
 ```
 
 ### Rule 1.2: Singleton Pattern for Unique Utilities
+*Aspired Customization*
 Where only one instance of a utility class is required, the singleton pattern shall be used. The constructor must be private, and copy/move operations deleted.
 
 **Example:**
@@ -93,6 +103,7 @@ private:
 ## 2. Global State and Variables
 
 ### Rule 2.1: Global Variables Are Prohibited
+*Aspired Customization*
 No global variables shall be used. Shared state must be encapsulated within classes as private static members if necessary.
 
 **Example (Compliant):**
@@ -117,6 +128,7 @@ int counter = 0;
 ## 3. Function Simplicity and Clarity
 
 ### Rule 3.1: Functions Shall Be Short and Do One Thing
+*Aspired Customization*
 Each function shall perform a single, well-defined task. Functions exceeding 30 lines are discouraged and must be justified.
 
 **Example (Compliant):**
@@ -136,6 +148,7 @@ bool FileReader::process(const std::string& path, Data& out);
 ## 4. Error Handling
 
 ### Rule 4.1: All Public Methods Shall Return Status
+*Aspired Customization*
 All public methods must return a status indicator (e.g., bool, enum, or error code). Silent failure is forbidden.
 
 **Example:**
@@ -144,6 +157,7 @@ bool Logger::access_log(const std::string& msg);
 ```
 
 ### Rule 4.2: Error Codes Must Be Checked
+*Aspired Customization*
 All error codes and return values must be checked by the caller. Ignoring return values is forbidden.
 
 **Example (Compliant):**
@@ -163,9 +177,11 @@ logger.access_log("entry"); // BAD: Return value ignored
 ## 5. Naming and Documentation
 
 ### Rule 5.1: Names Shall Be Descriptive
+*Aspired Customization*
 All identifiers (classes, functions, variables) must have clear, descriptive names. Abbreviations are discouraged unless universally understood.
 
 ### Rule 5.2: Doxygen-Style Comments Required
+*Aspired Customization*
 Every public class and method must be documented with a Doxygen-style comment, describing its purpose, parameters, and return value.
 
 **Example:**
@@ -183,6 +199,7 @@ bool FileReader::read_line(std::string& out);
 ## 6. C++-Only Features
 
 ### Rule 6.1: Use Only Standard C++ Features
+*C++20-specific*
 C-style constructs such as FILE*, printf, and char* are forbidden in utility classes. Use std::string, std::ifstream, std::ofstream, and other standard library types.
 
 **Example (Compliant):**
@@ -196,6 +213,7 @@ FILE* fp = fopen("log.txt", "a"); // BAD
 ```
 
 ### Rule 6.2: Avoid Advanced C++ Features
+*C++20-specific*
 Templates, macros (except include guards), and metaprogramming are forbidden in utility classes.
 
 ---
@@ -203,6 +221,7 @@ Templates, macros (except include guards), and metaprogramming are forbidden in 
 ## 7. Thread Safety
 
 ### Rule 7.1: Public Methods Must Be Thread-Safe
+*Aspired Customization*
 If a class is used from multiple threads, all public methods must be thread-safe. Use std::mutex and lock with std::lock_guard.
 
 **Example:**
@@ -228,6 +247,7 @@ private:
 ## 8. Macros
 
 ### Rule 8.1: Macros Are Forbidden Except for Include Guards
+*Aspired Customization*
 Macros shall not be used for logic, configuration, or logging. Only include guards are permitted.
 
 **Example (Compliant):**
@@ -248,6 +268,7 @@ Macros shall not be used for logic, configuration, or logging. Only include guar
 ## 9. File Handling
 
 ### Rule 9.1: Always Check File Open Status
+*Aspired Customization*
 Files must be checked for successful opening before use. Use RAII for file streams.
 
 **Example:**
@@ -263,6 +284,7 @@ if (!ofs.is_open()) {
 ## 10. Simplicity and Readability
 
 ### Rule 10.1: Code Shall Be Readable and Maintainable
+*Aspired Customization*
 Code must be easy to read, maintain, and review. Clever tricks, obscure syntax, and non-standard extensions are forbidden.
 
 **Example (Compliant):**
@@ -342,6 +364,7 @@ private:
 
 ## Naming Conventions
 
+*Aspired Customization*
 All code in the Aspire project must follow these naming conventions:
 
 - **Variables and Functions:** Use `lower_case_with_underscores` for all variable and function names (e.g., `sensor_value`, `read_data()`).
@@ -351,14 +374,22 @@ These conventions are mandatory and help ensure consistency, clarity, and profes
 
 ## Line Length Limit
 
+*Aspired Customization*
 - No line of code, comment, or documentation shall exceed 80 characters in length. This ensures readability and consistency across all environments and tools.
 
 ---
 
 ## Review and Tooling
 
+*Aspired Customization*
 - Each small change (commit or pull request) should have a maximum diff of 20 lines. This encourages incremental, reviewable changes and helps maintain code quality.
 
 ## Conclusion
 
-These rules are mandatory for all code in the Aspire project. They are designed to ensure the highest standards of safety, clarity, and maintainability, in the spirit of the NASA JPL C Coding Standard, but adapted for disciplined, modern C++ development. 
+*Aspired Customization*
+These rules are mandatory for all code in the Aspire project. They are designed to ensure the highest standards of safety, clarity, and maintainability, in the spirit of the NASA JPL C Coding Standard, but adapted for disciplined, modern C++ development.
+
+## Reference
+
+For the full set of original rules, see:
+[NASA JPL C Coding Standard - Official Repository](https://github.com/nasa-jpl) 

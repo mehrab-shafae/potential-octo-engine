@@ -33,7 +33,7 @@ constexpr int PORT    = 8080;  // پورت سرور
 constexpr int BACKLOG = 100;   // تعداد کلاینت‌هایی که در
                                // صف انتظار می‌مانند
 constexpr int BUFFER_SIZE = 4096;  // اندازه بافر برای خواندن داده
-constexpr int MAX_EVENTS = 100;  // حداکثر رویدادهای epoll در هر بار انتظار
+constexpr int MAX_EVENTS  = 100;   // حداکثر رویدادهای epoll در هر بار انتظار
 constexpr int CONNECTION_TIMEOUT = 30;  // timeout اتصال (ثانیه)
 constexpr int MAX_HEADERS        = 50;  // حداکثر تعداد header ها
 // --- محدودیت منابع ---
