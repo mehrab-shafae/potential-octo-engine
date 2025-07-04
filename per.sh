@@ -6,6 +6,6 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 sudo chown -R root:wheel $(pwd)
-sudo chmod -R 770 $(pwd)/**/
+sudo chmod -R 770 $(pwd)
 # sudo chmod -R 2664 $(pwd)/**/*.{c*,h*,md,sh}
 echo "Done"
