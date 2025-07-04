@@ -184,6 +184,26 @@ int main()
     // --- Initialize Configuration System ---
     Config& config = Config::instance();
 
+    // Load configuration from file first
+    if(config.config_file_exists("aspire.conf"))
+    {
+        if(config.load_from_file("aspire.conf"))
+        {
+            Logger::instance().info_log(
+                "Configuration loaded from aspire.conf");
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Failed to load aspire.conf, using defaults");
+        }
+    }
+    else
+    {
+        Logger::instance().info_log(
+            "No configuration file found, using defaults");
+    }
+
     // Auto-detect system capabilities and set optimal defaults
     if(!config.auto_detect_system())
     {
@@ -246,7 +266,7 @@ int main()
         }
         if(pid == 0)
         {
-                    // Child process: only runs the server loop
+            // Child process: only runs the server loop
             break;
         }
         // Parent process: continues to next fork iteration
@@ -285,8 +305,8 @@ int main()
         static_cast<size_t>(config.get_max_events()));
 
     // --- Main server loop with epoll ---
-    while(!stop_server && !reload_server)  // If shutdown or reload signal received,
-                                           // loop stops
+    while(!stop_server && !reload_server)  // If shutdown or reload signal
+                                           // received, loop stops
     {
         int nfds = epoll_wait(
             epoll_fd, events.data(), static_cast<int>(events.size()),
@@ -369,9 +389,9 @@ int main()
                     }
                     // Add client to epoll
                     epoll_event client_ev;
-                    client_ev.events =
-                        EPOLLIN | EPOLLET | EPOLLRDHUP;  // Edge triggered +
-                                                         // Detect connection close
+                    client_ev.events = EPOLLIN | EPOLLET |
+                                       EPOLLRDHUP;  // Edge triggered +
+                                                    // Detect connection close
                     client_ev.data.fd = client_socket;
                     if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket,
                                  &client_ev) == -1)
@@ -494,7 +514,8 @@ int main()
                             {
                                 content_len = std::stoul(it->second);
                             }
-                            // Only remove if all data (header + body) has arrived
+                            // Only remove if all data (header + body) has
+                            // arrived
                             if(conn.buffer().size() >= req_len + content_len)
                             {
                                 req_len += content_len;
@@ -514,7 +535,8 @@ int main()
                     }
                 }
 
-                // --- Process request queue and generate responses (pipelining) ---
+                // --- Process request queue and generate responses (pipelining)
+                // ---
                 while(!conn.request_queue().empty())
                 {
                     HttpParser& parser_in_queue = conn.request_queue().front();
@@ -560,7 +582,8 @@ int main()
                     conn.request_queue().pop();
                 }
 
-                // --- If there's something to send and EPOLLOUT is not active, activate it ---
+                // --- If there's something to send and EPOLLOUT is not active,
+                // activate it ---
                 if(!conn.response_queue().empty() && conn.send_buffer().empty())
                 {
                     conn.send_buffer() = conn.response_queue().front();
@@ -625,7 +648,8 @@ int main()
                         ev_mod.events  = EPOLLIN | EPOLLET;
                         ev_mod.data.fd = client_fd;
                         epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &ev_mod);
-                        // If keep-alive is off and response queue is empty, close connection
+                        // If keep-alive is off and response queue is empty,
+                        // close connection
                         if(!conn.keep_alive() &&
                            conn.response_queue().empty() &&
                            !conn.chunked_streaming())
@@ -661,8 +685,9 @@ int main()
         pid_t pid = fork();
         if(pid == 0)
         {
-                    // Child: restart main (with same socket)
-        // execv for complete process replacement (here we just restart main)
+            // Child: restart main (with same socket)
+            // execv for complete process replacement (here we just restart
+            // main)
             char* argv[] = {const_cast<char*>("./aspire"), nullptr};
             execv(argv[ 0 ], argv);
             // If execv fails:

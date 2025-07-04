@@ -24,6 +24,8 @@
 #include <string>
 #endif
 
+#include "Logger.hpp"
+
 Config& Config::instance()
 {
     static Config config;
@@ -73,21 +75,283 @@ bool Config::load_from_file(const std::string& config_path)
         }
     }
 
+    // Apply loaded configuration values to actual variables
+    apply_loaded_config();
+
     return true;
+}
+
+void Config::apply_loaded_config()
+{
+    // Helper function to safely parse integer values
+    auto parse_int = [](const std::string& value, int default_val) -> int
+    {
+        try
+        {
+            return std::stoi(value);
+        }
+        catch(...)
+        {
+            return default_val;
+        }
+    };
+
+    // Apply loaded values to configuration variables
+    if(config_.find("port") != config_.end())
+    {
+        int new_port = parse_int(config_[ "port" ], 8080);
+        if(new_port >= 1 && new_port <= 65535) { port_ = new_port; }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid port number: " + config_[ "port" ] +
+                ", using default: 8080");
+        }
+    }
+
+    if(config_.find("backlog") != config_.end())
+    {
+        int new_backlog = parse_int(config_[ "backlog" ], 100);
+        if(new_backlog >= 1 && new_backlog <= 1000) { backlog_ = new_backlog; }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid backlog value: " + config_[ "backlog" ] +
+                ", using default: 100");
+        }
+    }
+
+    if(config_.find("buffer_size") != config_.end())
+    {
+        int new_buffer_size = parse_int(config_[ "buffer_size" ], 4096);
+        if(new_buffer_size >= 1024 && new_buffer_size <= 65536)
+        {
+            buffer_size_ = new_buffer_size;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid buffer_size: " + config_[ "buffer_size" ] +
+                ", using default: 4096");
+        }
+    }
+
+    if(config_.find("max_events") != config_.end())
+    {
+        int new_max_events = parse_int(config_[ "max_events" ], 100);
+        if(new_max_events >= 10 && new_max_events <= 1000)
+        {
+            max_events_ = new_max_events;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid max_events: " + config_[ "max_events" ] +
+                ", using default: 100");
+        }
+    }
+
+    if(config_.find("connection_timeout") != config_.end())
+    {
+        int new_timeout = parse_int(config_[ "connection_timeout" ], 30);
+        if(new_timeout >= 5 && new_timeout <= 300)
+        {
+            connection_timeout_ = new_timeout;
+        }
+        else
+        {
+            Logger::instance().error_log("Invalid connection_timeout: " +
+                                         config_[ "connection_timeout" ] +
+                                         ", using default: 30");
+        }
+    }
+
+    if(config_.find("max_headers") != config_.end())
+    {
+        int new_max_headers = parse_int(config_[ "max_headers" ], 50);
+        if(new_max_headers >= 10 && new_max_headers <= 200)
+        {
+            max_headers_ = new_max_headers;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid max_headers: " + config_[ "max_headers" ] +
+                ", using default: 50");
+        }
+    }
+
+    if(config_.find("max_connections") != config_.end())
+    {
+        int new_max_connections = parse_int(config_[ "max_connections" ], 1024);
+        if(new_max_connections >= 100 && new_max_connections <= 65536)
+        {
+            max_connections_ = new_max_connections;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid max_connections: " + config_[ "max_connections" ] +
+                ", using default: 1024");
+        }
+    }
+
+    if(config_.find("max_pipeline") != config_.end())
+    {
+        int new_max_pipeline = parse_int(config_[ "max_pipeline" ], 10);
+        if(new_max_pipeline >= 1 && new_max_pipeline <= 50)
+        {
+            max_pipeline_ = new_max_pipeline;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid max_pipeline: " + config_[ "max_pipeline" ] +
+                ", using default: 10");
+        }
+    }
+
+    if(config_.find("num_processes") != config_.end())
+    {
+        int new_num_processes = parse_int(config_[ "num_processes" ], 4);
+        if(new_num_processes >= 1 && new_num_processes <= 32)
+        {
+            num_processes_ = new_num_processes;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid num_processes: " + config_[ "num_processes" ] +
+                ", using default: 4");
+        }
+    }
+
+    if(config_.find("socket_rcvbuf") != config_.end())
+    {
+        int new_socket_rcvbuf = parse_int(config_[ "socket_rcvbuf" ], 1048576);
+        if(new_socket_rcvbuf >= 4096 && new_socket_rcvbuf <= 1048576)
+        {
+            socket_rcvbuf_ = new_socket_rcvbuf;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid socket_rcvbuf: " + config_[ "socket_rcvbuf" ] +
+                ", using default: 1048576");
+        }
+    }
+
+    if(config_.find("socket_sndbuf") != config_.end())
+    {
+        int new_socket_sndbuf = parse_int(config_[ "socket_sndbuf" ], 1048576);
+        if(new_socket_sndbuf >= 4096 && new_socket_sndbuf <= 1048576)
+        {
+            socket_sndbuf_ = new_socket_sndbuf;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid socket_sndbuf: " + config_[ "socket_sndbuf" ] +
+                ", using default: 1048576");
+        }
+    }
+
+    if(config_.find("epoll_timeout") != config_.end())
+    {
+        int new_epoll_timeout = parse_int(config_[ "epoll_timeout" ], 50);
+        if(new_epoll_timeout >= 10 && new_epoll_timeout <= 1000)
+        {
+            epoll_timeout_ = new_epoll_timeout;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid epoll_timeout: " + config_[ "epoll_timeout" ] +
+                ", using default: 50");
+        }
+    }
+
+    if(config_.find("cleanup_interval") != config_.end())
+    {
+        int new_cleanup_interval = parse_int(config_[ "cleanup_interval" ], 10);
+        if(new_cleanup_interval >= 5 && new_cleanup_interval <= 60)
+        {
+            cleanup_interval_ = new_cleanup_interval;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid cleanup_interval: " + config_[ "cleanup_interval" ] +
+                ", using default: 10");
+        }
+    }
+
+    if(config_.find("fd_limit") != config_.end())
+    {
+        int new_fd_limit = parse_int(config_[ "fd_limit" ], 4096);
+        if(new_fd_limit >= 1024 && new_fd_limit <= 65536)
+        {
+            fd_limit_ = new_fd_limit;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid fd_limit: " + config_[ "fd_limit" ] +
+                ", using default: 4096");
+        }
+    }
+
+    if(config_.find("cpu_cores") != config_.end())
+    {
+        int new_cpu_cores = parse_int(config_[ "cpu_cores" ], 0);
+        if(new_cpu_cores > 0 && new_cpu_cores <= 128)
+        {
+            cpu_cores_ = new_cpu_cores;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid cpu_cores: " + config_[ "cpu_cores" ] +
+                ", will auto-detect");
+        }
+    }
+
+    if(config_.find("total_memory_mb") != config_.end())
+    {
+        int new_total_memory_mb = parse_int(config_[ "total_memory_mb" ], 0);
+        if(new_total_memory_mb > 0 && new_total_memory_mb <= 1048576)
+        {  // Max 1TB
+            total_memory_mb_ = new_total_memory_mb;
+        }
+        else
+        {
+            Logger::instance().error_log(
+                "Invalid total_memory_mb: " + config_[ "total_memory_mb" ] +
+                ", will auto-detect");
+        }
+    }
 }
 
 bool Config::auto_detect_system()
 {
     std::lock_guard<std::mutex> lock(mtx_);
 
-    // Detect CPU cores
-    cpu_cores_ = detect_cpu_cores();
+    // Detect CPU cores only if not set in config
+    if(cpu_cores_ == 0) { cpu_cores_ = detect_cpu_cores(); }
 
-    // Detect total memory
-    total_memory_mb_ = detect_total_memory();
+    // Detect total memory only if not set in config
+    if(total_memory_mb_ == 0) { total_memory_mb_ = detect_total_memory(); }
 
-    // Calculate optimal values
-    calculate_optimal_limits();
+    // Calculate optimal values only if not set in config
+    if(num_processes_ == 4)
+    {  // Default value, likely not set in config
+        num_processes_ = calculate_optimal_workers();
+    }
+
+    if(max_connections_ == 1024)
+    {  // Default value, likely not set in config
+        calculate_optimal_limits();
+    }
 
     // Validate configuration
     is_valid_ = validate_config();
@@ -396,4 +660,10 @@ std::string Config::get(const std::string& key,
     std::lock_guard<std::mutex> lock(mtx_);
     auto                        it = config_.find(key);
     return (it != config_.end()) ? it->second : default_value;
+}
+
+bool Config::config_file_exists(const std::string& config_path) const
+{
+    std::ifstream file(config_path);
+    return file.good();
 }

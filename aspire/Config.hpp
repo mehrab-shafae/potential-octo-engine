@@ -35,6 +35,14 @@ class Config
     bool load_from_file(const std::string& config_path = "aspire.conf");
 
     /**
+     * @brief Check if configuration file exists.
+     * @param config_path Path to configuration file.
+     * @return true if file exists, false otherwise.
+     */
+    bool config_file_exists(
+        const std::string& config_path = "aspire.conf") const;
+
+    /**
      * @brief Auto-detect system capabilities and set optimal defaults.
      * @return true if successful, false otherwise.
      */
@@ -197,6 +205,11 @@ class Config
      * @return true if valid, false otherwise.
      */
     bool validate_config() const;
+
+    /**
+     * @brief Apply loaded configuration values to actual variables.
+     */
+    void apply_loaded_config();
 
     mutable std::mutex                 mtx_;
     std::map<std::string, std::string> config_;
