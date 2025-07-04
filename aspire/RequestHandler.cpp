@@ -13,6 +13,9 @@
 #include <sstream>
 
 #include "Logger.hpp"
+#include "MetricsCollector.hpp"
+#include "RateLimiter.hpp"
+#include "SlowDown.hpp"
 
 // Global variables
 const std::string end_chunk = "0\r\n\r\n";
@@ -55,10 +58,11 @@ std::string_view get_status_text(int status_code) noexcept
 HttpResponseStatus handle_http_request(const HttpParser& parser,
                                        bool&             keep_alive,
                                        bool&             is_chunked_stream,
-                                       std::string& response, Connection* conn)
+                                       std::string& response, Connection* conn,
+                                       std::string_view client_ip)
 {
     return RequestHandler::handle_http_request(
-        parser, keep_alive, is_chunked_stream, response, conn);
+        parser, keep_alive, is_chunked_stream, response, conn, client_ip);
 }
 
 // RequestHandler static member function implementations
@@ -127,13 +131,12 @@ std::string_view RequestHandler::get_end_chunk() noexcept
     return end_chunk;
 }
 
-HttpResponseStatus RequestHandler::handle_http_request(const HttpParser& parser,
-                                                       bool& keep_alive,
-                                                       bool& is_chunked_stream,
-                                                       std::string& response,
-                                                       Connection*  conn)
+HttpResponseStatus RequestHandler::handle_http_request(
+    const HttpParser& parser, bool& keep_alive, bool& is_chunked_stream,
+    std::string& response, Connection* conn, std::string_view client_ip)
 {
-    (void)conn;  // Suppress unused parameter warning
+    (void)conn;       // Suppress unused parameter warning
+    (void)client_ip;  // Suppress unused parameter warning
 
     // Check for keep-alive header
     auto headers       = parser.get_headers();
@@ -225,6 +228,16 @@ HttpResponseStatus RequestHandler::handle_get_request(const HttpParser& parser,
 
         response = header;
         return HttpResponseStatus::OK;
+    }
+    else if(path == "/health") { return handle_health_request(response); }
+    else if(path == "/metrics") { return handle_metrics_request(response); }
+    else if(path == "/rate-limit-status")
+    {
+        return handle_rate_limit_status("127.0.0.1", response);
+    }
+    else if(path == "/slow-down-status")
+    {
+        return handle_slow_down_status("127.0.0.1", response);
     }
     else
     {
@@ -345,4 +358,87 @@ std::string RequestHandler::generate_error_response(int status_code,
     html += "</body>\n</html>";
 
     return html;
+}
+
+HttpResponseStatus RequestHandler::handle_health_request(std::string& response)
+{
+    // Simple health check endpoint
+    std::string json_content =
+        generate_json_response("{\"status\":\"healthy\",\"timestamp\":\"" +
+                               std::to_string(std::time(nullptr)) + "\"}");
+
+    response = build_http_response(200, "application/json", json_content, true);
+    return HttpResponseStatus::OK;
+}
+
+HttpResponseStatus RequestHandler::handle_metrics_request(std::string& response)
+{
+    // Return metrics in JSON format
+    std::string metrics_json = MetricsCollector::instance().get_metrics_json();
+    response = build_http_response(200, "application/json", metrics_json, true);
+    return HttpResponseStatus::OK;
+}
+
+HttpResponseStatus RequestHandler::handle_rate_limit_status(
+    std::string_view client_ip, std::string& response)
+{
+    if(client_ip.empty())
+    {
+        std::string error_content =
+            generate_error_response(400, "Client IP required");
+        response = build_http_response(400, "text/html", error_content, false);
+        return HttpResponseStatus::BadRequest;
+    }
+
+    // Get rate limit statistics for the client
+    auto stats = RateLimiter::instance().get_client_stats(client_ip);
+    if(!stats)
+    {
+        std::string json_content = generate_json_response(
+            "{\"client\":\"" + std::string(client_ip) +
+            "\",\"status\":\"not_found\",\"message\":\"No rate limiting data "
+            "for this client\"}");
+        response =
+            build_http_response(404, "application/json", json_content, true);
+        return HttpResponseStatus::NotFound;
+    }
+
+    // Format the statistics as JSON
+    std::string json_content = "{\"client\":\"" + std::string(client_ip) +
+                               "\",\"status\":\"found\",\"data\":\"" +
+                               std::string(*stats) + "\"}";
+    response = build_http_response(200, "application/json", json_content, true);
+    return HttpResponseStatus::OK;
+}
+
+HttpResponseStatus RequestHandler::handle_slow_down_status(
+    std::string_view client_ip, std::string& response)
+{
+    if(client_ip.empty())
+    {
+        std::string error_content =
+            generate_error_response(400, "Client IP required");
+        response = build_http_response(400, "text/html", error_content, false);
+        return HttpResponseStatus::BadRequest;
+    }
+
+    // Get slow-down statistics for the client
+    auto stats = SlowDown::instance().get_client_stats(client_ip);
+    if(!stats)
+    {
+        std::string json_content =
+            generate_json_response("{\"client\":\"" + std::string(client_ip) +
+                                   "\",\"status\":\"not_found\",\"message\":"
+                                   "\"No slow-down data for this client\"}");
+        response =
+            build_http_response(404, "application/json", json_content, true);
+        return HttpResponseStatus::NotFound;
+    }
+
+    // Format the statistics as JSON
+    std::string json_content = "{\"client\":\"" + std::string(client_ip) +
+                               "\",\"status\":\"found\",\"data\":\"" +
+                               std::string(*stats) + "\"}";
+    response = build_http_response(200, "application/json", json_content, true);
+    return HttpResponseStatus::OK;
 }

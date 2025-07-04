@@ -395,6 +395,203 @@ void Config::apply_loaded_config()
         }
     }
 
+    // Rate Limiting configuration
+    if(config_.find("max_requests_per_window") != config_.end())
+    {
+        int new_max_requests =
+            parse_int_safe(config_[ "max_requests_per_window" ], 1000);
+        if(validate_int_range(new_max_requests, 1, 10000))
+        {
+            rate_limit_max_requests_ = new_max_requests;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid max_requests_per_window: " +
+                config_[ "max_requests_per_window" ] + ", using default: 1000");
+        }
+    }
+
+    if(config_.find("rate_limit_window_seconds") != config_.end())
+    {
+        int new_window_seconds =
+            parse_int_safe(config_[ "rate_limit_window_seconds" ], 60);
+        if(validate_int_range(new_window_seconds, 1, 3600))
+        {
+            rate_limit_window_seconds_ = new_window_seconds;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid rate_limit_window_seconds: " +
+                config_[ "rate_limit_window_seconds" ] + ", using default: 60");
+        }
+    }
+
+    if(config_.find("rate_limit_burst_size") != config_.end())
+    {
+        int new_burst_size =
+            parse_int_safe(config_[ "rate_limit_burst_size" ], 100);
+        if(validate_int_range(new_burst_size, 0, 1000))
+        {
+            rate_limit_burst_size_ = new_burst_size;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid rate_limit_burst_size: " +
+                config_[ "rate_limit_burst_size" ] + ", using default: 100");
+        }
+    }
+
+    if(config_.find("rate_limit_block_on_exceed") != config_.end())
+    {
+        std::string value = config_[ "rate_limit_block_on_exceed" ];
+        if(value == "true" || value == "1" || value == "yes")
+        {
+            rate_limit_block_on_exceed_ = true;
+        }
+        else if(value == "false" || value == "0" || value == "no")
+        {
+            rate_limit_block_on_exceed_ = false;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid rate_limit_block_on_exceed: " + value +
+                ", using default: false");
+        }
+    }
+
+    // Slow-Down configuration
+    if(config_.find("slow_down_window_ms") != config_.end())
+    {
+        int new_window_ms =
+            parse_int_safe(config_[ "slow_down_window_ms" ], 60000);
+        if(validate_int_range(new_window_ms, 1000, 300000))
+        {
+            slow_down_window_ms_ = new_window_ms;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid slow_down_window_ms: " +
+                config_[ "slow_down_window_ms" ] + ", using default: 60000");
+        }
+    }
+
+    if(config_.find("slow_down_delay_after") != config_.end())
+    {
+        int new_delay_after =
+            parse_int_safe(config_[ "slow_down_delay_after" ], 10);
+        if(validate_int_range(new_delay_after, 1, 100))
+        {
+            slow_down_delay_after_ = new_delay_after;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid slow_down_delay_after: " +
+                config_[ "slow_down_delay_after" ] + ", using default: 10");
+        }
+    }
+
+    if(config_.find("slow_down_delay_ms") != config_.end())
+    {
+        int new_delay_ms = parse_int_safe(config_[ "slow_down_delay_ms" ], 100);
+        if(validate_int_range(new_delay_ms, 0, 10000))
+        {
+            slow_down_delay_ms_ = new_delay_ms;
+        }
+        else
+        {
+            (void)Logger::instance().error_log("Invalid slow_down_delay_ms: " +
+                                               config_[ "slow_down_delay_ms" ] +
+                                               ", using default: 100");
+        }
+    }
+
+    if(config_.find("slow_down_max_delay_ms") != config_.end())
+    {
+        int new_max_delay_ms =
+            parse_int_safe(config_[ "slow_down_max_delay_ms" ], 5000);
+        if(validate_int_range(new_max_delay_ms, 100, 60000))
+        {
+            slow_down_max_delay_ms_ = new_max_delay_ms;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid slow_down_max_delay_ms: " +
+                config_[ "slow_down_max_delay_ms" ] + ", using default: 5000");
+        }
+    }
+
+    if(config_.find("slow_down_delay_multiplier") != config_.end())
+    {
+        try
+        {
+            double new_multiplier =
+                std::stod(config_[ "slow_down_delay_multiplier" ]);
+            if(new_multiplier > 0.0 && new_multiplier <= 10.0)
+            {
+                slow_down_delay_multiplier_ = new_multiplier;
+            }
+            else
+            {
+                (void)Logger::instance().error_log(
+                    "Invalid slow_down_delay_multiplier: " +
+                    config_[ "slow_down_delay_multiplier" ] +
+                    ", using default: 1.0");
+            }
+        }
+        catch(...)
+        {
+            (void)Logger::instance().error_log(
+                "Invalid slow_down_delay_multiplier: " +
+                config_[ "slow_down_delay_multiplier" ] +
+                ", using default: 1.0");
+        }
+    }
+
+    if(config_.find("slow_down_skip_successful") != config_.end())
+    {
+        std::string value = config_[ "slow_down_skip_successful" ];
+        if(value == "true" || value == "1" || value == "yes")
+        {
+            slow_down_skip_successful_ = true;
+        }
+        else if(value == "false" || value == "0" || value == "no")
+        {
+            slow_down_skip_successful_ = false;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid slow_down_skip_successful: " + value +
+                ", using default: false");
+        }
+    }
+
+    if(config_.find("slow_down_skip_failed") != config_.end())
+    {
+        std::string value = config_[ "slow_down_skip_failed" ];
+        if(value == "true" || value == "1" || value == "yes")
+        {
+            slow_down_skip_failed_ = true;
+        }
+        else if(value == "false" || value == "0" || value == "no")
+        {
+            slow_down_skip_failed_ = false;
+        }
+        else
+        {
+            (void)Logger::instance().error_log(
+                "Invalid slow_down_skip_failed: " + value +
+                ", using default: false");
+        }
+    }
+
     // Override auto-detected values if specified in config
     if(config_.find("cpu_cores") != config_.end())
     {
@@ -592,6 +789,33 @@ void Config::print_config() const
     std::cout << "  FD Limit: " << fd_limit_ << std::endl;
     std::cout << std::endl;
 
+    std::cout << "Rate Limiting Settings:" << std::endl;
+    std::cout << "  Max Requests per Window: " << rate_limit_max_requests_
+              << std::endl;
+    std::cout << "  Window Seconds: " << rate_limit_window_seconds_ << "s"
+              << std::endl;
+    std::cout << "  Burst Size: " << rate_limit_burst_size_ << std::endl;
+    std::cout << "  Block on Exceed: "
+              << (rate_limit_block_on_exceed_ ? "Yes" : "No") << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "Slow-Down Settings:" << std::endl;
+    std::cout << "  Window Milliseconds: " << slow_down_window_ms_ << "ms"
+              << std::endl;
+    std::cout << "  Delay After: " << slow_down_delay_after_ << " requests"
+              << std::endl;
+    std::cout << "  Delay Milliseconds: " << slow_down_delay_ms_ << "ms"
+              << std::endl;
+    std::cout << "  Max Delay Milliseconds: " << slow_down_max_delay_ms_ << "ms"
+              << std::endl;
+    std::cout << "  Delay Multiplier: " << slow_down_delay_multiplier_
+              << std::endl;
+    std::cout << "  Skip Successful: "
+              << (slow_down_skip_successful_ ? "Yes" : "No") << std::endl;
+    std::cout << "  Skip Failed: " << (slow_down_skip_failed_ ? "Yes" : "No")
+              << std::endl;
+    std::cout << std::endl;
+
     std::cout << "Configuration Valid: " << (is_valid_ ? "Yes" : "No")
               << std::endl;
     std::cout << "================================" << std::endl;
@@ -768,4 +992,72 @@ int Config::parse_int_safe(std::string_view value, int default_val) noexcept
 bool Config::validate_int_range(int value, int min, int max) noexcept
 {
     return (value >= min && value <= max);
+}
+
+// Rate Limiting getters
+int Config::get_rate_limit_max_requests() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return rate_limit_max_requests_;
+}
+
+int Config::get_rate_limit_window_seconds() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return rate_limit_window_seconds_;
+}
+
+int Config::get_rate_limit_burst_size() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return rate_limit_burst_size_;
+}
+
+bool Config::get_rate_limit_block_on_exceed() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return rate_limit_block_on_exceed_;
+}
+
+// Slow-Down getters
+int Config::get_slow_down_window_ms() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_window_ms_;
+}
+
+int Config::get_slow_down_delay_after() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_delay_after_;
+}
+
+int Config::get_slow_down_delay_ms() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_delay_ms_;
+}
+
+int Config::get_slow_down_max_delay_ms() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_max_delay_ms_;
+}
+
+double Config::get_slow_down_delay_multiplier() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_delay_multiplier_;
+}
+
+bool Config::get_slow_down_skip_successful() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_skip_successful_;
+}
+
+bool Config::get_slow_down_skip_failed() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mtx_);
+    return slow_down_skip_failed_;
 }

@@ -14,6 +14,9 @@
 
 #include "Connection.hpp"
 #include "HttpParser.hpp"
+#include "MetricsCollector.hpp"
+#include "RateLimiter.hpp"
+#include "SlowDown.hpp"
 
 /**
  * @brief HTTP response status codes for handler functions.
@@ -103,7 +106,8 @@ HttpResponseStatus handle_http_request(const HttpParser& parser,
                                        bool&             keep_alive,
                                        bool&             is_chunked_stream,
                                        std::string&      response,
-                                       Connection*       conn = nullptr);
+                                       Connection*       conn      = nullptr,
+                                       std::string_view  client_ip = "");
 
 /**
  * @brief HTTP request handler with modern C++20 features.
@@ -121,11 +125,13 @@ class RequestHandler
      * @param is_chunked_stream Output parameter for chunked streaming
      * @param response Output parameter for the response string
      * @param conn Optional connection object for advanced features
+     * @param client_ip Optional client IP for rate limiting
      * @return Status of the request handling
      */
     [[nodiscard]] static HttpResponseStatus handle_http_request(
         const HttpParser& parser, bool& keep_alive, bool& is_chunked_stream,
-        std::string& response, Connection* conn = nullptr);
+        std::string& response, Connection* conn = nullptr,
+        std::string_view client_ip = "");
 
     /**
      * @brief Build a complete HTTP response.
@@ -222,6 +228,40 @@ class RequestHandler
      */
     [[nodiscard]] static std::string generate_error_response(
         int status_code, std::string_view message);
+
+    /**
+     * @brief Handle health check endpoint.
+     * @param response Output response.
+     * @return Status of handling.
+     */
+    [[nodiscard]] static HttpResponseStatus handle_health_request(
+        std::string& response);
+
+    /**
+     * @brief Handle metrics endpoint.
+     * @param response Output response.
+     * @return Status of handling.
+     */
+    [[nodiscard]] static HttpResponseStatus handle_metrics_request(
+        std::string& response);
+
+    /**
+     * @brief Handle rate limit status endpoint.
+     * @param client_ip Client IP address.
+     * @param response Output response.
+     * @return Status of handling.
+     */
+    [[nodiscard]] static HttpResponseStatus handle_rate_limit_status(
+        std::string_view client_ip, std::string& response);
+
+    /**
+     * @brief Handle slow-down status endpoint.
+     * @param client_ip Client IP address.
+     * @param response Output response.
+     * @return Status of handling.
+     */
+    [[nodiscard]] static HttpResponseStatus handle_slow_down_status(
+        std::string_view client_ip, std::string& response);
 };
 
 // Global variables for chunked transfer encoding

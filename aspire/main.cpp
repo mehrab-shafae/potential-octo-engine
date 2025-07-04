@@ -31,7 +31,10 @@
 #include "Connection.hpp"
 #include "HttpParser.hpp"
 #include "Logger.hpp"
+#include "MetricsCollector.hpp"
+#include "RateLimiter.hpp"
 #include "RequestHandler.hpp"
+#include "SlowDown.hpp"
 
 // External declarations for global functions
 extern std::string       build_http_response(int              status_code,
@@ -333,6 +336,13 @@ int main()
         if(now - last_cleanup > config.get_cleanup_interval())
         {
             cleanup_timeout_connections(epoll_fd, connections);
+
+            // Cleanup expired rate limiting entries
+            (void)RateLimiter::instance().cleanup_expired();
+
+            // Cleanup expired slow-down entries
+            (void)SlowDown::instance().cleanup_expired();
+
             last_cleanup = now;
         }
 
@@ -411,6 +421,13 @@ int main()
                         connections[ client_socket ] =
                             std::make_unique<Connection>(client_socket);
                         parsers[ client_socket ] = HttpParser();
+
+                        // Record connection for metrics
+                        MetricsCollector::instance().record_connection_event(
+                            true);
+                        MetricsCollector::instance().update_active_connections(
+                            connections.size());
+
                         (void)Logger::instance().info_log(
                             "Client connected: " +
                             std::to_string(client_socket));
@@ -437,6 +454,11 @@ int main()
                     close_connection(epoll_fd, conn);
                     connections.erase(client_fd);
                     parsers.erase(client_fd);
+
+                    // Update metrics for connection closure
+                    MetricsCollector::instance().update_active_connections(
+                        connections.size());
+
                     (void)Logger::instance().info_log(
                         "Client disconnected (RDHUP): " +
                         std::to_string(client_fd));
@@ -463,6 +485,11 @@ int main()
                             close_connection(epoll_fd, conn);
                             connections.erase(client_fd);
                             parsers.erase(client_fd);
+
+                            // Update metrics for connection closure
+                            MetricsCollector::instance()
+                                .update_active_connections(connections.size());
+
                             (void)Logger::instance().info_log(
                                 "Client "
                                 "disconnected: " +
@@ -554,10 +581,48 @@ int main()
                     HttpParser& parser_in_queue = conn.request_queue().front();
                     bool        keep_alive = false, is_chunked_stream = false;
                     std::string response;
+
+                    // Get client IP for rate limiting (simplified - in real
+                    // implementation this would be extracted from the
+                    // connection)
+                    std::string client_ip = "127.0.0.1";  // Placeholder
+
+                    // Record request start for metrics
+                    auto timing = MetricsCollector::instance().record_request(
+                        parser_in_queue.get_method(),
+                        parser_in_queue.get_path());
+
+                    // Check rate limiting
+                    if(!RateLimiter::instance().is_allowed(client_ip))
+                    {
+                        MetricsCollector::instance()
+                            .record_rate_limited_request();
+                        response = build_http_response(
+                            429, "text/plain", "Too Many Requests", false);
+                        conn.keep_alive() = false;
+                        conn.response_queue().push(response);
+                        conn.request_queue().pop();
+                        continue;
+                    }
+
+                    // Check slow-down (before processing request)
+                    auto slow_down_result =
+                        SlowDown::instance().check_request(client_ip);
+                    if(slow_down_result.should_delay)
+                    {
+                        // Apply delay before processing request
+                        std::this_thread::sleep_for(std::chrono::milliseconds(
+                            slow_down_result.delay_ms));
+                        (void)Logger::instance().info_log(
+                            "Applied slow-down delay: " +
+                            std::to_string(slow_down_result.delay_ms) + "ms");
+                    }
+
                     // --- Access Log: start time ---
                     auto t_start = std::chrono::steady_clock::now();
                     handle_http_request(parser_in_queue, keep_alive,
-                                        is_chunked_stream, response, &conn);
+                                        is_chunked_stream, response, &conn,
+                                        client_ip);
                     // --- Access Log: end time and log entry ---
                     auto t_end = std::chrono::steady_clock::now();
                     auto duration_ms =
@@ -589,6 +654,16 @@ int main()
                                            std::to_string(duration_ms) +
                                            "ms fd=" + std::to_string(client_fd);
                     (void)Logger::instance().access_log(log_line);
+
+                    // Record request completion for metrics
+                    MetricsCollector::instance().record_request_completion(
+                        timing, status_code, response.size(),
+                        parser_in_queue.get_body().size());
+
+                    // Update slow-down with actual status code
+                    (void)SlowDown::instance().check_request(client_ip,
+                                                             status_code);
+
                     conn.keep_alive() = keep_alive;
                     if(is_chunked_stream)
                     {

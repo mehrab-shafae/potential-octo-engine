@@ -165,6 +165,72 @@ class Config
     [[nodiscard]] int get_fd_limit() const noexcept;
 
     /**
+     * @brief Get rate limiting max requests per window.
+     * @return Maximum requests per window.
+     */
+    [[nodiscard]] int get_rate_limit_max_requests() const noexcept;
+
+    /**
+     * @brief Get rate limiting window seconds.
+     * @return Window time in seconds.
+     */
+    [[nodiscard]] int get_rate_limit_window_seconds() const noexcept;
+
+    /**
+     * @brief Get rate limiting burst size.
+     * @return Burst size allowance.
+     */
+    [[nodiscard]] int get_rate_limit_burst_size() const noexcept;
+
+    /**
+     * @brief Get rate limiting block on exceed setting.
+     * @return Whether to block on exceed.
+     */
+    [[nodiscard]] bool get_rate_limit_block_on_exceed() const noexcept;
+
+    /**
+     * @brief Get slow-down window milliseconds.
+     * @return Window time in milliseconds.
+     */
+    [[nodiscard]] int get_slow_down_window_ms() const noexcept;
+
+    /**
+     * @brief Get slow-down delay after requests.
+     * @return Number of requests before delay starts.
+     */
+    [[nodiscard]] int get_slow_down_delay_after() const noexcept;
+
+    /**
+     * @brief Get slow-down delay milliseconds.
+     * @return Initial delay in milliseconds.
+     */
+    [[nodiscard]] int get_slow_down_delay_ms() const noexcept;
+
+    /**
+     * @brief Get slow-down max delay milliseconds.
+     * @return Maximum delay in milliseconds.
+     */
+    [[nodiscard]] int get_slow_down_max_delay_ms() const noexcept;
+
+    /**
+     * @brief Get slow-down delay multiplier.
+     * @return Delay multiplier.
+     */
+    [[nodiscard]] double get_slow_down_delay_multiplier() const noexcept;
+
+    /**
+     * @brief Get slow-down skip successful requests setting.
+     * @return Whether to skip successful requests.
+     */
+    [[nodiscard]] bool get_slow_down_skip_successful() const noexcept;
+
+    /**
+     * @brief Get slow-down skip failed requests setting.
+     * @return Whether to skip failed requests.
+     */
+    [[nodiscard]] bool get_slow_down_skip_failed() const noexcept;
+
+    /**
      * @brief Get CPU core count.
      * @return Number of CPU cores.
      */
@@ -274,19 +340,35 @@ class Config
     int total_memory_mb_ = 0;
 
     // Server configuration
-    int  port_               = 8080;
-    int  backlog_            = 100;
-    int  buffer_size_        = 4096;
-    int  max_events_         = 100;
-    int  connection_timeout_ = 30;
-    int  max_headers_        = 50;
-    int  max_connections_    = 1024;
-    int  max_pipeline_       = 10;
-    int  num_processes_      = 4;
-    int  socket_rcvbuf_      = 1048576;
-    int  socket_sndbuf_      = 1048576;
-    int  epoll_timeout_      = 50;
-    int  cleanup_interval_   = 10;
-    int  fd_limit_           = 4096;
-    bool is_valid_           = false;
+    int port_               = 8080;
+    int backlog_            = 100;
+    int buffer_size_        = 4096;
+    int max_events_         = 100;
+    int connection_timeout_ = 30;
+    int max_headers_        = 50;
+    int max_connections_    = 1024;
+    int max_pipeline_       = 10;
+    int num_processes_      = 4;
+    int socket_rcvbuf_      = 1048576;
+    int socket_sndbuf_      = 1048576;
+    int epoll_timeout_      = 50;
+    int cleanup_interval_   = 10;
+    int fd_limit_           = 4096;
+
+    // Rate Limiting configuration
+    int  rate_limit_max_requests_    = 1000;
+    int  rate_limit_window_seconds_  = 60;
+    int  rate_limit_burst_size_      = 100;
+    bool rate_limit_block_on_exceed_ = false;
+
+    // Slow-Down configuration
+    int    slow_down_window_ms_        = 60000;
+    int    slow_down_delay_after_      = 10;
+    int    slow_down_delay_ms_         = 100;
+    int    slow_down_max_delay_ms_     = 5000;
+    double slow_down_delay_multiplier_ = 1.0;
+    bool   slow_down_skip_successful_  = false;
+    bool   slow_down_skip_failed_      = false;
+
+    bool is_valid_ = false;
 };
