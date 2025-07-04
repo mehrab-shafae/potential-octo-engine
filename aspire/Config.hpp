@@ -10,17 +10,42 @@
 #pragma once
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 
 /**
- * @brief Smart configuration system for Aspire HTTP Server.
+ * @brief Smart configuration system for Aspire HTTP Server with modern C++20
+ * features.
  *
  * Provides auto-detection of system capabilities and intelligent
- * default values based on hardware specifications.
+ * default values based on hardware specifications. Uses RAII principles
+ * and provides better error handling.
  */
 class Config
 {
    public:
+    /**
+     * @brief Configuration validation result.
+     */
+    enum class ValidationResult
+    {
+        Valid,
+        InvalidPort,
+        InvalidBacklog,
+        InvalidBufferSize,
+        InvalidMaxEvents,
+        InvalidTimeout,
+        InvalidMaxHeaders,
+        InvalidMaxConnections,
+        InvalidMaxPipeline,
+        InvalidProcesses,
+        InvalidSocketBuffers,
+        InvalidEpollTimeout,
+        InvalidCleanupInterval,
+        InvalidFdLimit
+    };
+
     /**
      * @brief Get the singleton instance of Config.
      * @return Reference to Config instance.
@@ -32,123 +57,130 @@ class Config
      * @param config_path Path to configuration file.
      * @return true if successful, false otherwise.
      */
-    bool load_from_file(const std::string& config_path = "aspire.conf");
+    [[nodiscard]] bool load_from_file(
+        std::string_view config_path = "aspire.conf");
 
     /**
      * @brief Check if configuration file exists.
      * @param config_path Path to configuration file.
      * @return true if file exists, false otherwise.
      */
-    bool config_file_exists(
-        const std::string& config_path = "aspire.conf") const;
+    [[nodiscard]] bool config_file_exists(
+        std::string_view config_path = "aspire.conf") const;
 
     /**
      * @brief Auto-detect system capabilities and set optimal defaults.
      * @return true if successful, false otherwise.
      */
-    bool auto_detect_system();
+    [[nodiscard]] bool auto_detect_system();
+
+    /**
+     * @brief Validate current configuration.
+     * @return ValidationResult indicating the validation status.
+     */
+    [[nodiscard]] ValidationResult validate_configuration() const;
 
     /**
      * @brief Get server port.
      * @return Server port number.
      */
-    int get_port() const;
+    [[nodiscard]] int get_port() const noexcept;
 
     /**
      * @brief Get connection backlog.
      * @return Connection backlog value.
      */
-    int get_backlog() const;
+    [[nodiscard]] int get_backlog() const noexcept;
 
     /**
      * @brief Get buffer size for I/O operations.
      * @return Buffer size in bytes.
      */
-    int get_buffer_size() const;
+    [[nodiscard]] int get_buffer_size() const noexcept;
 
     /**
      * @brief Get maximum epoll events.
      * @return Maximum epoll events.
      */
-    int get_max_events() const;
+    [[nodiscard]] int get_max_events() const noexcept;
 
     /**
      * @brief Get connection timeout.
      * @return Connection timeout in seconds.
      */
-    int get_connection_timeout() const;
+    [[nodiscard]] int get_connection_timeout() const noexcept;
 
     /**
      * @brief Get maximum headers per request.
      * @return Maximum headers count.
      */
-    int get_max_headers() const;
+    [[nodiscard]] int get_max_headers() const noexcept;
 
     /**
      * @brief Get maximum concurrent connections.
      * @return Maximum connections count.
      */
-    int get_max_connections() const;
+    [[nodiscard]] int get_max_connections() const noexcept;
 
     /**
      * @brief Get maximum pipelined requests.
      * @return Maximum pipelined requests.
      */
-    int get_max_pipeline() const;
+    [[nodiscard]] int get_max_pipeline() const noexcept;
 
     /**
      * @brief Get number of worker processes.
      * @return Number of worker processes.
      */
-    int get_num_processes() const;
+    [[nodiscard]] int get_num_processes() const noexcept;
 
     /**
      * @brief Get socket receive buffer size.
      * @return Socket receive buffer size in bytes.
      */
-    int get_socket_rcvbuf() const;
+    [[nodiscard]] int get_socket_rcvbuf() const noexcept;
 
     /**
      * @brief Get socket send buffer size.
      * @return Socket send buffer size in bytes.
      */
-    int get_socket_sndbuf() const;
+    [[nodiscard]] int get_socket_sndbuf() const noexcept;
 
     /**
      * @brief Get epoll timeout in milliseconds.
      * @return Epoll timeout in milliseconds.
      */
-    int get_epoll_timeout() const;
+    [[nodiscard]] int get_epoll_timeout() const noexcept;
 
     /**
      * @brief Get cleanup interval in seconds.
      * @return Cleanup interval in seconds.
      */
-    int get_cleanup_interval() const;
+    [[nodiscard]] int get_cleanup_interval() const noexcept;
 
     /**
      * @brief Get file descriptor limit.
      * @return File descriptor limit.
      */
-    int get_fd_limit() const;
+    [[nodiscard]] int get_fd_limit() const noexcept;
 
     /**
      * @brief Get CPU core count.
      * @return Number of CPU cores.
      */
-    int get_cpu_cores() const;
+    [[nodiscard]] int get_cpu_cores() const noexcept;
 
     /**
      * @brief Get total system memory in MB.
      * @return Total memory in MB.
      */
-    int get_total_memory_mb() const;
+    [[nodiscard]] int get_total_memory_mb() const noexcept;
 
     /**
      * @brief Check if configuration is valid.
      * @return true if valid, false otherwise.
      */
-    bool is_valid() const;
+    [[nodiscard]] bool is_valid() const noexcept;
 
     /**
      * @brief Print current configuration.
@@ -159,8 +191,9 @@ class Config
      * @brief Set a configuration value.
      * @param key Configuration key.
      * @param value Configuration value.
+     * @return true if set successfully, false otherwise.
      */
-    void set(const std::string& key, const std::string& value);
+    [[nodiscard]] bool set(std::string_view key, std::string_view value);
 
     /**
      * @brief Get a configuration value.
@@ -168,8 +201,17 @@ class Config
      * @param default_value Default value if key not found.
      * @return Configuration value.
      */
-    std::string get(const std::string& key,
-                    const std::string& default_value = "") const;
+    [[nodiscard]] std::string get(std::string_view key,
+                                  std::string_view default_value = "") const;
+
+    /**
+     * @brief Get configuration value as integer.
+     * @param key Configuration key.
+     * @param default_value Default value if key not found or invalid.
+     * @return Optional integer value.
+     */
+    [[nodiscard]] std::optional<int> get_int(std::string_view key,
+                                             int default_value = 0) const;
 
    private:
     Config()                         = default;
@@ -181,19 +223,19 @@ class Config
      * @brief Detect CPU core count.
      * @return Number of CPU cores.
      */
-    int detect_cpu_cores() const;
+    [[nodiscard]] int detect_cpu_cores() const;
 
     /**
      * @brief Detect total system memory.
      * @return Total memory in MB.
      */
-    int detect_total_memory() const;
+    [[nodiscard]] int detect_total_memory() const;
 
     /**
      * @brief Calculate optimal worker processes count.
      * @return Optimal number of worker processes.
      */
-    int calculate_optimal_workers() const;
+    [[nodiscard]] int calculate_optimal_workers() const;
 
     /**
      * @brief Calculate optimal connection limits.
@@ -201,15 +243,28 @@ class Config
     void calculate_optimal_limits();
 
     /**
-     * @brief Validate configuration values.
-     * @return true if valid, false otherwise.
-     */
-    bool validate_config() const;
-
-    /**
      * @brief Apply loaded configuration values to actual variables.
      */
     void apply_loaded_config();
+
+    /**
+     * @brief Parse integer value safely.
+     * @param value String value to parse.
+     * @param default_val Default value if parsing fails.
+     * @return Parsed integer value.
+     */
+    [[nodiscard]] static int parse_int_safe(std::string_view value,
+                                            int default_val) noexcept;
+
+    /**
+     * @brief Validate integer value within range.
+     * @param value Value to validate.
+     * @param min Minimum allowed value.
+     * @param max Maximum allowed value.
+     * @return true if valid, false otherwise.
+     */
+    [[nodiscard]] static bool validate_int_range(int value, int min,
+                                                 int max) noexcept;
 
     mutable std::mutex                 mtx_;
     std::map<std::string, std::string> config_;
@@ -219,20 +274,19 @@ class Config
     int total_memory_mb_ = 0;
 
     // Server configuration
-    int port_               = 8080;
-    int backlog_            = 100;
-    int buffer_size_        = 4096;
-    int max_events_         = 100;
-    int connection_timeout_ = 30;
-    int max_headers_        = 50;
-    int max_connections_    = 1024;
-    int max_pipeline_       = 10;
-    int num_processes_      = 4;
-    int socket_rcvbuf_      = 1048576;  // 1MB
-    int socket_sndbuf_      = 1048576;  // 1MB
-    int epoll_timeout_      = 50;       // 50ms
-    int cleanup_interval_   = 10;       // 10 seconds
-    int fd_limit_           = 4096;
-
-    bool is_valid_ = false;
+    int  port_               = 8080;
+    int  backlog_            = 100;
+    int  buffer_size_        = 4096;
+    int  max_events_         = 100;
+    int  connection_timeout_ = 30;
+    int  max_headers_        = 50;
+    int  max_connections_    = 1024;
+    int  max_pipeline_       = 10;
+    int  num_processes_      = 4;
+    int  socket_rcvbuf_      = 1048576;
+    int  socket_sndbuf_      = 1048576;
+    int  epoll_timeout_      = 50;
+    int  cleanup_interval_   = 10;
+    int  fd_limit_           = 4096;
+    bool is_valid_           = false;
 };

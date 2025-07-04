@@ -10,136 +10,339 @@
 #include "RequestHandler.hpp"
 
 #include <ctime>
+#include <sstream>
 
+#include "Logger.hpp"
+
+// Global variables
+const std::string end_chunk = "0\r\n\r\n";
+
+// Global function implementations
 std::string build_http_response(int status_code, std::string_view content_type,
                                 std::string_view body, bool keep_alive)
 {
-    std::string status_text;
-    switch(status_code)
-    {
-        case 200:
-            status_text = "OK";
-            break;
-        case 400:
-            status_text = "Bad Request";
-            break;
-        case 404:
-            status_text = "Not Found";
-            break;
-        case 405:
-            status_text = "Method Not Allowed";
-            break;
-        case 500:
-            status_text = "Internal Server Error";
-            break;
-        default:
-            status_text = "Unknown";
-            break;
-    }
+    const std::string status_text =
+        std::string(RequestHandler::get_status_text(status_code));
+
     std::string response =
         "HTTP/1.1 " + std::to_string(status_code) + " " + status_text + "\r\n";
     response += "Content-Type: " + std::string(content_type) + "\r\n";
     response += "Content-Length: " + std::to_string(body.length()) + "\r\n";
-    response +=
-        keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
-    response += "\r\n" + std::string(body);
-    return response;
-}
 
-std::string build_chunked_header(bool keep_alive)
-{
-    std::string response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Transfer-Encoding: chunked\r\n";
-    response +=
-        keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
+    if(keep_alive) { response += "Connection: keep-alive\r\n"; }
+    else { response += "Connection: close\r\n"; }
+
+    response += "Server: Aspire/1.0\r\n";
     response += "\r\n";
+    response += std::string(body);
+
     return response;
 }
 
 std::string build_chunk(std::string_view data)
 {
-    return std::to_string(data.size()) + "\r\n" + std::string(data) + "\r\n";
+    std::stringstream ss;
+    ss << std::hex << data.length() << "\r\n";
+    ss << std::string(data) << "\r\n";
+    return ss.str();
 }
 
-const std::string end_chunk = "0\r\n\r\n";
+std::string_view get_status_text(int status_code) noexcept
+{
+    return RequestHandler::get_status_text(status_code);
+}
 
 HttpResponseStatus handle_http_request(const HttpParser& parser,
                                        bool&             keep_alive,
                                        bool&             is_chunked_stream,
                                        std::string& response, Connection* conn)
 {
-    const std::string& method  = parser.get_method();
-    const std::string& path    = parser.get_path();
-    const auto&        headers = parser.get_headers();
-    // Check for keep-alive
-    auto it           = headers.find("Connection");
-    keep_alive        = (it != headers.end() && it->second == "keep-alive");
-    is_chunked_stream = false;
-    if(method == "GET")
+    return RequestHandler::handle_http_request(
+        parser, keep_alive, is_chunked_stream, response, conn);
+}
+
+// RequestHandler static member function implementations
+std::string_view RequestHandler::get_status_text(int status_code) noexcept
+{
+    switch(status_code)
     {
-        if(path == "/" || path == "/index.html")
-        {
-            std::string body =
-                "<html><body><h1>Welcome to Modular HTTP "
-                "Server</h1>"
-                "<p>This is an event-driven HTTP server using "
-                "epoll.</p>"
-                "<p>Current time: " +
-                std::to_string(time(nullptr)) +
-                "</p>"
-                "</body></html>";
-            response = build_http_response(200, "text/html", body, keep_alive);
-            return HttpResponseStatus::OK;
-        }
-        else if(path == "/api/status")
-        {
-            std::string body =
-                "{\"status\": \"running\", \"server\": "
-                "\"modular-epoll\"}";
-            response =
-                build_http_response(200, "application/json", body, keep_alive);
-            return HttpResponseStatus::OK;
-        }
-        else if(path == "/api/stream")
-        {
-            is_chunked_stream = true;
-            if(conn) conn->chunked_streaming() = true;
-            response = build_chunked_header(keep_alive);
-            return HttpResponseStatus::OK;
-        }
-        else
-        {
-            std::string body =
-                "<html><body><h1>404 Not Found</h1></body></html>";
-            response = build_http_response(404, "text/html", body, keep_alive);
-            return HttpResponseStatus::NotFound;
-        }
+        case 200:
+            return "OK";
+        case 201:
+            return "Created";
+        case 204:
+            return "No Content";
+        case 301:
+            return "Moved Permanently";
+        case 302:
+            return "Found";
+        case 304:
+            return "Not Modified";
+        case 400:
+            return "Bad Request";
+        case 401:
+            return "Unauthorized";
+        case 403:
+            return "Forbidden";
+        case 404:
+            return "Not Found";
+        case 405:
+            return "Method Not Allowed";
+        case 408:
+            return "Request Timeout";
+        case 429:
+            return "Too Many Requests";
+        case 500:
+            return "Internal Server Error";
+        case 501:
+            return "Not Implemented";
+        case 502:
+            return "Bad Gateway";
+        case 503:
+            return "Service Unavailable";
+        case 504:
+            return "Gateway Timeout";
+        case 505:
+            return "HTTP Version Not Supported";
+        default:
+            return "Unknown";
     }
-    else if(method == "POST")
+}
+
+std::string RequestHandler::build_http_response(int              status_code,
+                                                std::string_view content_type,
+                                                std::string_view body,
+                                                bool             keep_alive)
+{
+    return ::build_http_response(status_code, content_type, body, keep_alive);
+}
+
+std::string RequestHandler::build_chunk(std::string_view data)
+{
+    return ::build_chunk(data);
+}
+
+std::string_view RequestHandler::get_end_chunk() noexcept
+{
+    return end_chunk;
+}
+
+HttpResponseStatus RequestHandler::handle_http_request(const HttpParser& parser,
+                                                       bool& keep_alive,
+                                                       bool& is_chunked_stream,
+                                                       std::string& response,
+                                                       Connection*  conn)
+{
+    (void)conn;  // Suppress unused parameter warning
+
+    // Check for keep-alive header
+    auto headers       = parser.get_headers();
+    auto connection_it = headers.find("connection");
+    if(connection_it != headers.end())
     {
-        if(path == "/api/echo")
-        {
-            std::string body =
-                "{\"message\": \"Echo: " + parser.get_body() + "\"}";
-            response =
-                build_http_response(200, "application/json", body, keep_alive);
-            return HttpResponseStatus::OK;
-        }
-        else
-        {
-            std::string body =
-                "<html><body><h1>404 Not Found</h1></body></html>";
-            response = build_http_response(404, "text/html", body, keep_alive);
-            return HttpResponseStatus::NotFound;
-        }
+        keep_alive = (connection_it->second == "keep-alive");
     }
     else
     {
-        std::string body =
-            "<html><body><h1>405 Method Not Allowed</h1></body></html>";
-        response = build_http_response(405, "text/html", body, keep_alive);
+        keep_alive = true;  // Default to keep-alive
+    }
+
+    is_chunked_stream = false;
+
+    // Handle different HTTP methods
+    const std::string method = parser.get_method();
+    const std::string path   = parser.get_path();
+
+    if(method == "GET") { return handle_get_request(parser, response); }
+    else if(method == "POST") { return handle_post_request(parser, response); }
+    else if(method == "HEAD") { return handle_head_request(parser, response); }
+    else if(method == "OPTIONS")
+    {
+        return handle_options_request(parser, response);
+    }
+    else
+    {
+        // Method not allowed
+        response = build_http_response(405, "text/plain", "Method Not Allowed",
+                                       keep_alive);
         return HttpResponseStatus::MethodNotAllowed;
     }
+}
+
+HttpResponseStatus RequestHandler::handle_get_request(const HttpParser& parser,
+                                                      std::string& response)
+{
+    const std::string path = parser.get_path();
+
+    if(path == "/" || path == "/index.html")
+    {
+        std::string html_content = generate_html_response(
+            "Aspire Server",
+            "<h1>Welcome to Aspire HTTP Server</h1>"
+            "<p>This is a high-performance HTTP server built with modern "
+            "C++20.</p>"
+            "<ul>"
+            "<li><a href='/status'>Server Status</a></li>"
+            "<li><a href='/info'>Server Info</a></li>"
+            "<li><a href='/stream'>Chunked Stream</a></li>"
+            "</ul>");
+
+        response = build_http_response(200, "text/html", html_content, true);
+        return HttpResponseStatus::OK;
+    }
+    else if(path == "/status")
+    {
+        std::string json_content = generate_json_response(
+            "{\"status\":\"running\",\"uptime\":\"0\",\"connections\":0}");
+
+        response =
+            build_http_response(200, "application/json", json_content, true);
+        return HttpResponseStatus::OK;
+    }
+    else if(path == "/info")
+    {
+        std::string html_content = generate_html_response(
+            "Server Info",
+            "<h1>Server Information</h1>"
+            "<p><strong>Server:</strong> Aspire HTTP Server</p>"
+            "<p><strong>Version:</strong> 1.0</p>"
+            "<p><strong>Language:</strong> C++20</p>"
+            "<p><strong>Architecture:</strong> Event-driven, Non-blocking "
+            "I/O</p>");
+
+        response = build_http_response(200, "text/html", html_content, true);
+        return HttpResponseStatus::OK;
+    }
+    else if(path == "/stream")
+    {
+        // Start chunked transfer encoding
+        std::string header = "HTTP/1.1 200 OK\r\n";
+        header += "Content-Type: text/plain\r\n";
+        header += "Transfer-Encoding: chunked\r\n";
+        header += "Connection: keep-alive\r\n";
+        header += "Server: Aspire/1.0\r\n";
+        header += "\r\n";
+
+        response = header;
+        return HttpResponseStatus::OK;
+    }
+    else
+    {
+        std::string error_content =
+            generate_error_response(404, "Page not found");
+        response = build_http_response(404, "text/html", error_content, false);
+        return HttpResponseStatus::NotFound;
+    }
+}
+
+HttpResponseStatus RequestHandler::handle_post_request(const HttpParser& parser,
+                                                       std::string& response)
+{
+    const std::string path = parser.get_path();
+
+    if(path == "/echo")
+    {
+        // Echo back the request body
+        std::string body = parser.get_body();
+        response         = build_http_response(200, "text/plain", body, true);
+        return HttpResponseStatus::OK;
+    }
+    else
+    {
+        std::string error_content =
+            generate_error_response(404, "Endpoint not found");
+        response = build_http_response(404, "text/html", error_content, false);
+        return HttpResponseStatus::NotFound;
+    }
+}
+
+HttpResponseStatus RequestHandler::handle_head_request(const HttpParser& parser,
+                                                       std::string& response)
+{
+    const std::string path = parser.get_path();
+
+    if(path == "/" || path == "/index.html")
+    {
+        // Return headers only for HEAD request
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: text/html\r\n";
+        response += "Content-Length: 0\r\n";
+        response += "Connection: keep-alive\r\n";
+        response += "Server: Aspire/1.0\r\n";
+        response += "\r\n";
+
+        return HttpResponseStatus::OK;
+    }
+    else
+    {
+        response = "HTTP/1.1 404 Not Found\r\n";
+        response += "Content-Type: text/html\r\n";
+        response += "Content-Length: 0\r\n";
+        response += "Connection: close\r\n";
+        response += "Server: Aspire/1.0\r\n";
+        response += "\r\n";
+
+        return HttpResponseStatus::NotFound;
+    }
+}
+
+HttpResponseStatus RequestHandler::handle_options_request(
+    const HttpParser& parser, std::string& response)
+{
+    (void)parser;  // Suppress unused parameter warning
+
+    response = "HTTP/1.1 200 OK\r\n";
+    response += "Allow: GET, POST, HEAD, OPTIONS\r\n";
+    response += "Content-Length: 0\r\n";
+    response += "Connection: keep-alive\r\n";
+    response += "Server: Aspire/1.0\r\n";
+    response += "\r\n";
+
+    return HttpResponseStatus::OK;
+}
+
+std::string RequestHandler::generate_html_response(std::string_view title,
+                                                   std::string_view content)
+{
+    std::string html = "<!DOCTYPE html>\n<html>\n<head>\n";
+    html += "<title>" + std::string(title) + "</title>\n";
+    html += "<meta charset=\"UTF-8\">\n";
+    html += "<style>\n";
+    html += "body { font-family: Arial, sans-serif; margin: 40px; }\n";
+    html += "h1 { color: #333; }\n";
+    html += "a { color: #0066cc; text-decoration: none; }\n";
+    html += "a:hover { text-decoration: underline; }\n";
+    html += "</style>\n";
+    html += "</head>\n<body>\n";
+    html += std::string(content);
+    html += "\n</body>\n</html>";
+
+    return html;
+}
+
+std::string RequestHandler::generate_json_response(std::string_view data)
+{
+    return std::string(data);
+}
+
+std::string RequestHandler::generate_error_response(int status_code,
+                                                    std::string_view message)
+{
+    std::string html = "<!DOCTYPE html>\n<html>\n<head>\n";
+    html += "<title>Error " + std::to_string(status_code) + "</title>\n";
+    html += "<meta charset=\"UTF-8\">\n";
+    html += "<style>\n";
+    html +=
+        "body { font-family: Arial, sans-serif; margin: 40px; text-align: "
+        "center; }\n";
+    html += "h1 { color: #d32f2f; }\n";
+    html += "p { color: #666; }\n";
+    html += "</style>\n";
+    html += "</head>\n<body>\n";
+    html += "<h1>Error " + std::to_string(status_code) + "</h1>\n";
+    html += "<p>" + std::string(message) + "</p>\n";
+    html += "<p><a href='/'>Return to Home</a></p>\n";
+    html += "</body>\n</html>";
+
+    return html;
 }

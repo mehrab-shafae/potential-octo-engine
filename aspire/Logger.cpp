@@ -9,10 +9,10 @@
  */
 #include "Logger.hpp"
 
-#include <chrono>
-#include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 
 Logger& Logger::instance()
 {
@@ -20,32 +20,88 @@ Logger& Logger::instance()
     return logger;
 }
 
-void Logger::info_log(const std::string& msg)
+bool Logger::info_log(std::string_view msg)
 {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::cout << "[INFO]  " << msg << std::endl;
+    if(!logging_enabled_) { return false; }
+
+    return write_to_console("INFO", msg);
 }
 
-void Logger::error_log(const std::string& msg)
+bool Logger::error_log(std::string_view msg)
 {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::cerr << "[ERROR] " << msg << std::endl;
+    if(!logging_enabled_) { return false; }
+
+    return write_to_console("ERROR", msg);
 }
 
-void Logger::debug_log(const std::string& msg)
+bool Logger::debug_log(std::string_view msg)
 {
-    std::lock_guard<std::mutex> lock(mtx);
-    std::cout << "[DEBUG] " << msg << std::endl;
+    if(!logging_enabled_) { return false; }
+
+    return write_to_console("DEBUG", msg);
 }
 
-bool Logger::access_log(const std::string& msg)
+bool Logger::access_log(std::string_view msg)
 {
-    std::lock_guard<std::mutex> lock(access_log_mtx);
-    std::ofstream               ofs("access.log", std::ios::app);
-    if(ofs.is_open())
+    if(!logging_enabled_) { return false; }
+
+    return write_to_file("ACCESS", msg);
+}
+
+bool Logger::write_to_console(std::string_view level, std::string_view msg)
+{
+    try
     {
-        ofs << msg << std::endl;
+        const std::string timestamp = get_timestamp();
+        std::cout << "[" << timestamp << "] [" << level << "] " << msg
+                  << std::endl;
         return true;
     }
-    return false;
+    catch(...)
+    {
+        return false;
+    }
+}
+
+bool Logger::write_to_file(std::string_view level, std::string_view msg)
+{
+    try
+    {
+        const std::string timestamp = get_timestamp();
+        const std::string log_entry = "[" + timestamp + "] [" +
+                                      std::string(level) + "] " +
+                                      std::string(msg) + "\n";
+
+        std::ofstream log_file{"access.log", std::ios::app};
+        if(log_file.is_open())
+        {
+            log_file << log_entry;
+            return true;
+        }
+        return false;
+    }
+    catch(...)
+    {
+        return false;
+    }
+}
+
+std::string Logger::get_timestamp() const
+{
+    const auto now        = std::chrono::system_clock::now();
+    const auto time_point = std::chrono::system_clock::to_time_t(now);
+
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&time_point), "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+void Logger::enable_logging(bool enable) noexcept
+{
+    logging_enabled_ = enable;
+}
+
+bool Logger::is_logging_enabled() const noexcept
+{
+    return logging_enabled_;
 }
