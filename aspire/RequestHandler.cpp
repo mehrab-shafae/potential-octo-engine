@@ -1,7 +1,7 @@
 /*
  * IMPORTANT: All development of this file and ANY file in this project
  * (including headers and sources) MUST strictly comply with the rules and
- * standards defined in doc/rules/*. No exceptions are allowed. This notice
+ * standards defined in doc/rules. No exceptions are allowed. This notice
  * MUST appear at the top of EVERY file, without exception, to remind all
  * contributors.
  *
