@@ -19,6 +19,8 @@
 #include <sstream>
 #include <functional>
 #include <cctype>
+#include <variant>
+#include <memory> // Required for std::unique_ptr
 
 namespace aspire {
 
@@ -60,6 +62,79 @@ private:
 
     std::stack<char*> pool_;
     std::mutex m_;
+};
+} // namespace util
+
+namespace util {
+// RAII wrapper for file descriptors.
+class Fd {
+public:
+    Fd() = default;
+    explicit Fd(int fd) : fd_(fd) {}
+    ~Fd() { reset(); }
+
+    Fd(const Fd&) = delete;
+    Fd& operator=(const Fd&) = delete;
+
+    Fd(Fd&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+    Fd& operator=(Fd&& other) noexcept {
+        if (this != &other) {
+            reset();
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+
+    int get() const { return fd_; }
+    explicit operator int() const { return fd_; }
+    bool valid() const { return fd_ >= 0; }
+
+    int release() {
+        int tmp = fd_;
+        fd_ = -1;
+        return tmp;
+    }
+
+    void reset(int newFd = -1) {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+        fd_ = newFd;
+    }
+
+private:
+    int fd_{-1};
+};
+
+// Simple Expected<T> implementation for error handling without exceptions.
+// Holds either a value of type T or an error message.
+// For production code, consider std::expected (C++23) or a richer library.
+template <typename T>
+class Expected {
+public:
+    // Success
+    Expected(T&& val) : data_(std::make_unique<T>(std::move(val))) {}
+    // Disable lvalue copy for non-copyable types
+    Expected(const T&) = delete;
+
+    // Failure
+    Expected(std::string err) : data_(std::move(err)) {}
+
+    Expected(Expected&&) noexcept = default;
+    Expected& operator=(Expected&&) noexcept = default;
+
+    bool ok() const { return std::holds_alternative<std::unique_ptr<T>>(data_); }
+    T& value() { return *std::get<std::unique_ptr<T>>(data_); }
+    const T& value() const { return *std::get<std::unique_ptr<T>>(data_); }
+
+    // Move-out helper
+    T take() { return std::move(*std::get<std::unique_ptr<T>>(data_)); }
+
+    const std::string& error() const { return std::get<std::string>(data_); }
+
+private:
+    std::variant<std::unique_ptr<T>, std::string> data_;
 };
 } // namespace util
 
@@ -196,11 +271,10 @@ namespace engine {
 
 class IoUringEngine {
 public:
-    explicit IoUringEngine(unsigned int queueDepth = 1024) : queueDepth_(queueDepth) {
-        if (io_uring_queue_init(queueDepth_, &ring_, 0) < 0) {
-            throw std::runtime_error("io_uring_queue_init failed");
-        }
-    }
+    // Prefer using create() which returns util::Expected instead of throwing.
+    explicit IoUringEngine(unsigned int queueDepth = 1024);
+
+    static util::Expected<IoUringEngine> create(unsigned int queueDepth = 1024);
 
     ~IoUringEngine() {
         if (ring_.ring_fd >= 0) {
@@ -259,6 +333,22 @@ private:
     bool running_{false};
 };
 
+// ---------------- IoUringEngine definitions ----------------
+inline engine::IoUringEngine::IoUringEngine(unsigned int queueDepth) : queueDepth_(queueDepth) {
+    if (io_uring_queue_init(queueDepth_, &ring_, 0) < 0) {
+        // Mark as invalid; caller should check via create().
+        ring_.ring_fd = -1;
+    }
+}
+
+inline util::Expected<engine::IoUringEngine> engine::IoUringEngine::create(unsigned int queueDepth) {
+    IoUringEngine eng(queueDepth);
+    if (eng.ring_.ring_fd < 0) {
+        return std::string{"io_uring_queue_init failed"};
+    }
+    return std::move(eng);
+}
+
 } // namespace engine
 
 // --------------------------- transport namespace ------------------------
@@ -275,18 +365,19 @@ class Connection; // forward
 
 class TcpAcceptor {
 public:
+    static util::Expected<TcpAcceptor> create(IoUringEngine& eng, uint16_t port, int backlog = 128);
+
     TcpAcceptor(IoUringEngine& eng, uint16_t port, int backlog = 128) : engine_(eng) {
-        listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (listenFd_ < 0) throw std::runtime_error("socket() failed");
+        util::Fd sock(::socket(AF_INET, SOCK_STREAM, 0));
+        if (!sock.valid()) throw std::runtime_error("socket() failed");
+        listenFd_ = std::move(sock);
 
         int opt = 1;
-        if (::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-            ::close(listenFd_);
+        if (::setsockopt(static_cast<int>(listenFd_), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
             throw std::runtime_error("setsockopt() failed");
         }
 #ifdef SO_REUSEPORT
-        if (::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-            ::close(listenFd_);
+        if (::setsockopt(static_cast<int>(listenFd_), SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
             throw std::runtime_error("setsockopt(SO_REUSEPORT) failed");
         }
 #endif
@@ -294,27 +385,28 @@ public:
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
         addr.sin_port = htons(port);
-        if (::bind(listenFd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            ::close(listenFd_);
+        if (::bind(static_cast<int>(listenFd_), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             throw std::runtime_error("bind() failed");
         }
 
-        setNonBlocking(listenFd_);
-        if (::listen(listenFd_, backlog) < 0) {
-            ::close(listenFd_);
+        setNonBlocking(static_cast<int>(listenFd_));
+        if (::listen(static_cast<int>(listenFd_), backlog) < 0) {
             throw std::runtime_error("listen() failed");
         }
         std::cout << "Listening on 0.0.0.0:" << port << "\n";
         submitAccept();
     }
 
-    ~TcpAcceptor() {
-        if (listenFd_ >= 0) ::close(listenFd_);
-    }
+    ~TcpAcceptor() = default;
+
+    TcpAcceptor(const TcpAcceptor&) = delete;
+    TcpAcceptor& operator=(const TcpAcceptor&) = delete;
+    TcpAcceptor(TcpAcceptor&&) noexcept = default;
+    TcpAcceptor& operator=(TcpAcceptor&&) noexcept = default;
 
 private:
     IoUringEngine& engine_;
-    int listenFd_{};
+    util::Fd listenFd_{};
 
     static void setNonBlocking(int fd) {
         int flags = ::fcntl(fd, F_GETFL, 0);
@@ -328,7 +420,7 @@ private:
         static thread_local sockaddr_in clientAddr;
         static thread_local socklen_t clientLen = sizeof(clientAddr);
 
-        io_uring_prep_accept(sqe, listenFd_, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen, 0);
+        io_uring_prep_accept(sqe, static_cast<int>(listenFd_), reinterpret_cast<sockaddr*>(&clientAddr), &clientLen, 0);
         auto* ctx = new IoUringEngine::CompletionContext{&TcpAcceptor::onAccept, this};
         sqe->user_data = reinterpret_cast<uint64_t>(ctx);
         io_uring_submit(engine_.handle());
@@ -337,16 +429,24 @@ private:
     static void onAccept(IoUringEngine& eng, struct io_uring_cqe* cqe, void* data);
 };
 
+inline util::Expected<transport::TcpAcceptor> transport::TcpAcceptor::create(IoUringEngine& eng, uint16_t port, int backlog) {
+    try {
+        return TcpAcceptor(eng, port, backlog);
+    } catch (const std::exception& ex) {
+        return std::string(ex.what());
+    }
+}
+
 class Connection {
 public:
     Connection(IoUringEngine& eng, int fd) : engine_(eng), fd_(fd) {
         buffer_ = BufferPool::instance().acquire();
-        std::cout << "New connection fd=" << fd_ << "\n";
+        std::cout << "New connection fd=" << fd_.get() << "\n";
         submitRead();
     }
 
     ~Connection() {
-        if (!closed_) ::close(fd_);
+        // fd_ closes automatically via RAII
         BufferPool::instance().release(buffer_);
     }
 
@@ -355,7 +455,7 @@ public:
 
 private:
     IoUringEngine& engine_;
-    int fd_{};
+    util::Fd fd_{};
     bool closed_{false};
     bool keepAlive_{false};
 
@@ -372,7 +472,7 @@ private:
             closeConnection();
             return;
         }
-        io_uring_prep_recv(sqe, fd_, buffer_, kBufferSize, 0);
+        io_uring_prep_recv(sqe, static_cast<int>(fd_), buffer_, kBufferSize, 0);
         auto* ctx = new IoUringEngine::CompletionContext{&Connection::onRead, this};
         sqe->user_data = reinterpret_cast<uint64_t>(ctx);
         io_uring_submit(engine_.handle());
@@ -385,7 +485,7 @@ private:
             closeConnection();
             return;
         }
-        io_uring_prep_send(sqe, fd_, buffer_, static_cast<unsigned int>(len), 0);
+        io_uring_prep_send(sqe, static_cast<int>(fd_), buffer_, static_cast<unsigned int>(len), 0);
         auto* ctx = new IoUringEngine::CompletionContext{&Connection::onWrite, this};
         sqe->user_data = reinterpret_cast<uint64_t>(ctx);
         io_uring_submit(engine_.handle());
@@ -394,8 +494,8 @@ private:
     void closeConnection() {
         if (!closed_) {
             closed_ = true;
-            ::close(fd_);
-            std::cout << "Closed connection fd=" << fd_ << "\n";
+            fd_.reset();
+            std::cout << "Closed connection fd=" << fd_.get() << "\n";
             delete this; // Self-destroy
         }
     }
@@ -510,8 +610,20 @@ int main() {
 
         for (unsigned int i = 0; i < threads; ++i) {
             workers.emplace_back([port]() {
-                aspire::engine::IoUringEngine engine(1024);
-                aspire::transport::TcpAcceptor acceptor(engine, port);
+                auto engExp = aspire::engine::IoUringEngine::create(1024);
+                if (!engExp.ok()) {
+                    std::cerr << "Engine init failed: " << engExp.error() << "\n";
+                    return;
+                }
+                auto engine = engExp.take();
+
+                auto accExp = aspire::transport::TcpAcceptor::create(engine, port);
+                if (!accExp.ok()) {
+                    std::cerr << "Acceptor init failed: " << accExp.error() << "\n";
+                    return;
+                }
+                auto acceptor = accExp.take();
+
                 engine.run();
             });
         }
