@@ -1,3 +1,5 @@
+// by MRB
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <liburing.h>
@@ -6,17 +8,17 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <any>   // Required for std::any
-#include <array> // Required for std::array
+#include <any>
+#include <array>
 #include <cctype>
-#include <chrono> // Required for timing functionality
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
-#include <memory> // Required for std::unique_ptr
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stack>
@@ -29,35 +31,29 @@
 
 namespace aspire {
 
-// --------------------------- config namespace ---------------------------
 namespace config {
 
 struct SocketConfig {
-        // TCP optimizations
-        bool tcpNodelay{true};     // TCP_NODELAY for low latency
-        bool tcpQuickAck{true};    // TCP_QUICKACK for faster ACKs
-        bool tcpCork{false};       // TCP_CORK for better throughput (disabled for HTTP)
-        bool tcpKeepAlive{true};   // SO_KEEPALIVE
-        bool tcpWindowClamp{true}; // TCP_WINDOW_CLAMP for better performance
+        bool tcpNodelay{true};
+        bool tcpQuickAck{true};
+        bool tcpCork{false};
+        bool tcpKeepAlive{true};
+        bool tcpWindowClamp{true};
 
-        // Keep-alive parameters
-        int keepAliveTime{30};    // TCP_KEEPIDLE (seconds)
-        int keepAliveInterval{5}; // TCP_KEEPINTVL (seconds)
-        int keepAliveProbes{3};   // TCP_KEEPCNT (probes)
+        int keepAliveTime{30};
+        int keepAliveInterval{5};
+        int keepAliveProbes{3};
 
-        // Buffer sizes
-        int sendBufferSize{256 * 1024}; // SO_SNDBUF (256KB)
-        int recvBufferSize{256 * 1024}; // SO_RCVBUF (256KB)
+        int sendBufferSize{256 * 1024};
+        int recvBufferSize{256 * 1024};
 
-        // Connection pool settings
         size_t maxConnectionPoolSize{100};
         size_t maxBufferPoolSize{1000};
 
-        // Server settings
         int          port{8080};
         int          backlog{128};
         unsigned int queueDepth{1024};
-        unsigned int threads{0}; // 0 = auto-detect
+        unsigned int threads{0};
 };
 
 class ConfigManager {
@@ -72,7 +68,6 @@ class ConfigManager {
 
         void setSocketConfig(const SocketConfig& config) { socketConfig_ = config; }
 
-        // Helper methods for common configurations
         void setHighPerformance() {
             socketConfig_.tcpNodelay     = true;
             socketConfig_.tcpQuickAck    = true;
@@ -116,7 +111,6 @@ class ConfigManager {
 
 } // namespace config
 
-// --------------------------- util::BufferPool ---------------------------
 namespace util {
 class BufferPool {
     public:
@@ -128,7 +122,6 @@ class BufferPool {
         char* acquire(std::size_t size = kBufSize) {
             std::lock_guard<std::mutex> lock(m_);
 
-            // Find appropriate buffer size
             auto& pool = getPoolForSize(size);
             if(!pool.empty()) {
                 char* buf = pool.top();
@@ -136,7 +129,6 @@ class BufferPool {
                 return buf;
             }
 
-            // Align memory for better performance
             return static_cast<char*>(std::aligned_alloc(64, size));
         }
 
@@ -179,7 +171,6 @@ class BufferPool {
 } // namespace util
 
 namespace util {
-// RAII wrapper for file descriptors.
 class Fd {
     public:
         Fd() = default;
@@ -218,14 +209,11 @@ class Fd {
         int fd_{-1};
 };
 
-// Simple Expected<T> implementation for error handling without exceptions.
-// Holds either a value of type T or an error message.
-// For production code, consider std::expected (C++23) or a richer library.
 template <typename T> class Expected {
     public:
         // Success
         Expected(T&& val) : data_(std::make_unique<T>(std::move(val))) {}
-        // Disable lvalue copy for non-copyable types
+
         Expected(const T&) = delete;
 
         // Failure
@@ -269,10 +257,9 @@ class Response {
         std::unordered_map<std::string, std::string> headers;
         std::string                                  body;
 
-        // Zero-copy response using iovec
         struct IoVecResponse {
                 std::vector<struct iovec> iovecs;
-                std::vector<std::string>  strings; // Keep strings alive
+                std::vector<std::string>  strings;
 
                 void add(const std::string& str) {
                     strings.push_back(str);
@@ -353,7 +340,6 @@ class Response {
         }
 };
 
-// Middleware Context - similar to Express.js req/res objects
 class Context {
     public:
         Request&  req;
