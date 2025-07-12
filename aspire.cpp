@@ -23,6 +23,8 @@
 #include <variant>
 #include <memory> // Required for std::unique_ptr
 #include <array> // Required for std::array
+#include <any> // Required for std::any
+#include <chrono> // Required for timing functionality
 
 namespace aspire {
 
@@ -357,6 +359,118 @@ public:
     }
 };
 
+// Middleware Context - similar to Express.js req/res objects
+class Context {
+public:
+    Request& req;
+    Response& res;
+    
+    // Shared data between middleware
+    std::unordered_map<std::string, std::string> params;
+    std::unordered_map<std::string, std::any> data;
+    
+    Context(Request& request, Response& response) : req(request), res(response) {}
+    
+    // Helper methods for common operations
+    void setStatus(int code, const std::string& message = "") {
+        res.statusCode = code;
+        if (!message.empty()) {
+            res.statusMessage = message;
+        }
+    }
+    
+    void setHeader(const std::string& key, const std::string& value) {
+        res.headers[key] = value;
+    }
+    
+    void setBody(const std::string& body) {
+        res.body = body;
+    }
+    
+    std::string getParam(const std::string& key) const {
+        auto it = params.find(key);
+        return it != params.end() ? it->second : "";
+    }
+    
+    std::string getHeader(const std::string& key) const {
+        auto it = req.headers.find(key);
+        return it != req.headers.end() ? it->second : "";
+    }
+    
+    template<typename T>
+    void setData(const std::string& key, T&& value) {
+        data[key] = std::forward<T>(value);
+    }
+    
+    template<typename T>
+    T* getData(const std::string& key) {
+        auto it = data.find(key);
+        if (it != data.end()) {
+            try {
+                return std::any_cast<T>(&it->second);
+            } catch (...) {
+                return nullptr;
+            }
+        }
+        return nullptr;
+    }
+};
+
+// Middleware function type
+using Middleware = std::function<void(Context&, std::function<void()>)>;
+
+// Middleware types
+enum class MiddlewareType {
+    Global,     // Applied to all routes
+    Route,      // Applied to specific routes
+    Error       // Error handling middleware
+};
+
+// Middleware entry
+struct MiddlewareEntry {
+    Middleware middleware;
+    MiddlewareType type;
+    std::string path;  // For route-specific middleware
+    
+    MiddlewareEntry(Middleware m, MiddlewareType t, std::string p = "")
+        : middleware(std::move(m)), type(t), path(std::move(p)) {}
+};
+
+// Next function type for middleware chain
+using NextFunction = std::function<void()>;
+
+// Middleware chain executor
+class MiddlewareChain {
+public:
+    static void execute(const std::vector<MiddlewareEntry>& middleware, 
+                       Context& ctx, 
+                       std::function<void()> finalHandler) {
+        if (middleware.empty()) {
+            finalHandler();
+            return;
+        }
+        
+        executeNext(middleware.begin(), middleware.end(), ctx, finalHandler);
+    }
+
+private:
+    static void executeNext(std::vector<MiddlewareEntry>::const_iterator current,
+                           std::vector<MiddlewareEntry>::const_iterator end,
+                           Context& ctx,
+                           std::function<void()> finalHandler) {
+        if (current == end) {
+            finalHandler();
+            return;
+        }
+        
+        auto next = [current, end, &ctx, finalHandler]() mutable {
+            executeNext(++current, end, ctx, finalHandler);
+        };
+        
+        current->middleware(ctx, next);
+    }
+};
+
 enum class ParseResult {
     Incomplete,
     Complete,
@@ -503,9 +617,55 @@ public:
         return r;
     }
 
+    // Register middleware
+    void use(Middleware middleware) {
+        middleware_.emplace_back(std::move(middleware), MiddlewareType::Global);
+    }
+    
+    void use(const std::string& path, Middleware middleware) {
+        middleware_.emplace_back(std::move(middleware), MiddlewareType::Route, path);
+    }
+    
+    void useError(Middleware middleware) {
+        errorMiddleware_.emplace_back(std::move(middleware));
+    }
+
     void registerHandler(const std::string& path, Handler h) {
         insertRoute(&root_, path, 0, std::move(h));
         rebuildCharMaps(&root_);
+    }
+    
+    // Register handler with multiple middleware (Express.js style)
+    void registerHandler(const std::string& path, const std::vector<Middleware>& middleware, Handler h) {
+        // Create a composite handler that executes middleware chain + final handler
+        auto compositeHandler = [this, middleware, h = std::move(h)](const Request& req, Response& res) {
+            Context ctx(const_cast<Request&>(req), res);
+            
+            // Find route parameters
+            auto routeMatch = this->findWithParams(req.path);
+            ctx.params = routeMatch.params;
+            
+            auto finalHandler = [&ctx, &h]() {
+                h(ctx.req, ctx.res);
+            };
+            
+            // Convert middleware vector to MiddlewareEntry vector
+            std::vector<MiddlewareEntry> middlewareEntries;
+            for (const auto& m : middleware) {
+                middlewareEntries.emplace_back(m, MiddlewareType::Global);
+            }
+            
+            // Execute middleware chain
+            MiddlewareChain::execute(middlewareEntries, ctx, finalHandler);
+        };
+        
+        insertRoute(&root_, path, 0, std::move(compositeHandler));
+        rebuildCharMaps(&root_);
+    }
+    
+    // Register handler with single middleware
+    void registerHandler(const std::string& path, Middleware middleware, Handler h) {
+        registerHandler(path, std::vector<Middleware>{std::move(middleware)}, std::move(h));
     }
 
     Handler find(const std::string& path) const {
@@ -523,9 +683,51 @@ public:
         match.handler = findRouteWithParams(&root_, path, 0, match.params);
         return match;
     }
+    
+    // Execute middleware chain with route handler
+    void executeRequest(Request& req, Response& res) {
+        Context ctx(req, res);
+        
+        // Collect applicable middleware
+        std::vector<MiddlewareEntry> applicableMiddleware;
+        
+        // Add global middleware
+        for (const auto& entry : middleware_) {
+            if (entry.type == MiddlewareType::Global) {
+                applicableMiddleware.push_back(entry);
+            }
+        }
+        
+        // Add route-specific middleware
+        for (const auto& entry : middleware_) {
+            if (entry.type == MiddlewareType::Route && 
+                (entry.path.empty() || req.path.find(entry.path) == 0)) {
+                applicableMiddleware.push_back(entry);
+            }
+        }
+        
+        // Find route handler
+        auto routeMatch = findWithParams(req.path);
+        ctx.params = routeMatch.params;
+        
+        auto finalHandler = [&ctx, &routeMatch]() {
+            if (routeMatch.handler) {
+                routeMatch.handler(ctx.req, ctx.res);
+            } else {
+                ctx.setStatus(404, "Not Found");
+                ctx.setBody("404 Not Found\n");
+                ctx.setHeader("Content-Type", "text/plain");
+            }
+        };
+        
+        // Execute middleware chain
+        MiddlewareChain::execute(applicableMiddleware, ctx, finalHandler);
+    }
 
 private:
     RadixNode root_;
+    std::vector<MiddlewareEntry> middleware_;
+    std::vector<Middleware> errorMiddleware_;
 
     void rebuildCharMaps(RadixNode* node) {
         node->buildCharMap();
@@ -992,15 +1194,9 @@ private:
         }
 
         Response resp;
-        auto handler = Router::instance().find(req.path);
-        if (handler) {
-            handler(req, resp);
-        } else {
-            resp.statusCode = 404;
-            resp.statusMessage = "Not Found";
-            resp.body = "404 Not Found\n";
-            resp.headers["Content-Type"] = "text/plain";
-        }
+        
+        // Use middleware system instead of direct handler lookup
+        Router::instance().executeRequest(req, resp);
 
         // Connection persistence
         conn->keepAlive_ = !req.connectionClose && req.version == "HTTP/1.1";
@@ -1214,13 +1410,221 @@ int main() {
         // ===== END CONFIGURATION =====
         
         auto& router = http::Router::instance();
+        
+        // ===== MIDDLEWARE EXAMPLES =====
+        
+        // Global middleware - applied to all requests
+        router.use([](http::Context& ctx, std::function<void()> next) {
+            std::cout << "Global middleware: " << ctx.req.method << " " << ctx.req.path << std::endl;
+            
+            // Add request timestamp
+            ctx.setData("timestamp", std::chrono::system_clock::now());
+            
+            // Continue to next middleware
+            next();
+        });
+        
+        // Logging middleware
+        router.use([](http::Context& ctx [[maybe_unused]], std::function<void()> next) {
+            auto start = std::chrono::high_resolution_clock::now();
+            
+            next();
+            
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            
+            std::cout << "Request completed in " << duration.count() << " microseconds" << std::endl;
+        });
+        
+        // Authentication middleware for /api routes
+        router.use("/api", [](http::Context& ctx, std::function<void()> next) {
+            std::string authHeader = ctx.getHeader("authorization");
+            
+            if (authHeader.empty() || authHeader != "Bearer valid-token") {
+                ctx.setStatus(401, "Unauthorized");
+                ctx.setBody("Authentication required\n");
+                ctx.setHeader("Content-Type", "text/plain");
+                return; // Don't call next() - stop the chain
+            }
+            
+            // Add user info to context
+            ctx.setData("user", std::string("authenticated-user"));
+            next();
+        });
+        
+        // Rate limiting middleware for /api routes
+        router.use("/api", [](http::Context& ctx, std::function<void()> next) {
+            // Simple rate limiting - in production you'd use a proper rate limiter
+            static std::unordered_map<std::string, int> requestCounts;
+            static std::mutex rateLimitMutex;
+            
+            std::string clientIP = ctx.getHeader("x-forwarded-for");
+            if (clientIP.empty()) {
+                clientIP = "unknown";
+            }
+            
+            {
+                std::lock_guard<std::mutex> lock(rateLimitMutex);
+                if (requestCounts[clientIP] > 100) {
+                    ctx.setStatus(429, "Too Many Requests");
+                    ctx.setBody("Rate limit exceeded\n");
+                    ctx.setHeader("Content-Type", "text/plain");
+                    return;
+                }
+                requestCounts[clientIP]++;
+            }
+            
+            next();
+        });
+        
+        // CORS middleware
+        router.use([](http::Context& ctx, std::function<void()> next) {
+            ctx.setHeader("Access-Control-Allow-Origin", "*");
+            ctx.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+            ctx.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            
+            if (ctx.req.method == "OPTIONS") {
+                ctx.setStatus(200, "OK");
+                ctx.setBody("");
+                return;
+            }
+            
+            next();
+        });
+        
+        // Body parsing middleware for JSON
+        router.use([](http::Context& ctx, std::function<void()> next) {
+            std::string contentType = ctx.getHeader("content-type");
+            if (contentType.find("application/json") != std::string::npos && !ctx.req.body.empty()) {
+                // In a real implementation, you'd parse JSON here
+                ctx.setData("parsedBody", ctx.req.body);
+            }
+            next();
+        });
+        
+        // ===== ROUTE HANDLERS =====
+        
         router.registerHandler("/", [](const http::Request&, http::Response& resp) {
-            resp.body = "Hello from aspire\n";
+            resp.body = "Hello from aspire with middleware!\n";
             resp.headers["Content-Type"] = "text/plain";
         });
+        
         router.registerHandler("/echo", [](const http::Request& req, http::Response& resp) {
             resp.body = req.body;
             resp.headers["Content-Type"] = "text/plain";
+        });
+        
+        // ===== EXPRESS.JS STYLE MIDDLEWARE CHAINS =====
+        
+        // Define reusable middleware functions
+        auto loggingMiddleware = [](http::Context& ctx [[maybe_unused]], std::function<void()> next) {
+            std::cout << "Route-specific logging: " << ctx.req.method << " " << ctx.req.path << std::endl;
+            next();
+        };
+        
+        auto validationMiddleware = [](http::Context& ctx, std::function<void()> next) {
+            if (ctx.req.method == "POST" && ctx.req.body.empty()) {
+                ctx.setStatus(400, "Bad Request");
+                ctx.setBody("Request body is required\n");
+                ctx.setHeader("Content-Type", "text/plain");
+                return;
+            }
+            next();
+        };
+        
+        auto cacheMiddleware = [](http::Context& ctx, std::function<void()> next) {
+            // Simple cache check
+            if (ctx.req.method == "GET") {
+                ctx.setHeader("Cache-Control", "public, max-age=3600");
+            }
+            next();
+        };
+        
+        auto responseTimeMiddleware = [](http::Context& ctx [[maybe_unused]], std::function<void()> next) {
+            auto start = std::chrono::high_resolution_clock::now();
+            next();
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            ctx.setHeader("X-Response-Time", std::to_string(duration.count()) + "μs");
+        };
+        
+        auto userAuthMiddleware = [](http::Context& ctx, std::function<void()> next) {
+            std::string token = ctx.getHeader("x-user-token");
+            if (token.empty()) {
+                ctx.setStatus(401, "Unauthorized");
+                ctx.setBody("User token required\n");
+                ctx.setHeader("Content-Type", "text/plain");
+                return;
+            }
+            ctx.setData("userToken", token);
+            next();
+        };
+        
+        auto adminAuthMiddleware = [](http::Context& ctx, std::function<void()> next) {
+            std::string role = ctx.getHeader("x-user-role");
+            if (role != "admin") {
+                ctx.setStatus(403, "Forbidden");
+                ctx.setBody("Admin access required\n");
+                ctx.setHeader("Content-Type", "text/plain");
+                return;
+            }
+            ctx.setData("userRole", "admin");
+            next();
+        };
+        
+        // Express.js style route with multiple middleware
+        router.registerHandler("/api/users", 
+            std::vector<http::Middleware>{
+                loggingMiddleware,
+                cacheMiddleware,
+                responseTimeMiddleware
+            },
+            [](const http::Request& req [[maybe_unused]], http::Response& resp) {
+                resp.body = "{\"users\": [\"user1\", \"user2\", \"user3\"]}\n";
+                resp.headers["Content-Type"] = "application/json";
+            }
+        );
+        
+        // Route with authentication middleware
+        router.registerHandler("/api/admin/users", 
+            std::vector<http::Middleware>{
+                loggingMiddleware,
+                userAuthMiddleware,
+                adminAuthMiddleware,
+                responseTimeMiddleware
+            },
+            [](const http::Request& req [[maybe_unused]], http::Response& resp) {
+                resp.body = "{\"admin_users\": [\"admin1\", \"admin2\"]}\n";
+                resp.headers["Content-Type"] = "application/json";
+            }
+        );
+        
+        // Route with validation middleware
+        router.registerHandler("/api/posts", 
+            std::vector<http::Middleware>{
+                loggingMiddleware,
+                validationMiddleware,
+                responseTimeMiddleware
+            },
+            [](const http::Request& req [[maybe_unused]], http::Response& resp) {
+                resp.body = "{\"posts\": [\"post1\", \"post2\"]}\n";
+                resp.headers["Content-Type"] = "application/json";
+            }
+        );
+        
+        // Single middleware example
+        router.registerHandler("/api/simple", 
+            cacheMiddleware,
+            [](const http::Request& req [[maybe_unused]], http::Response& resp) {
+                resp.body = "{\"message\": \"Simple cached response\"}\n";
+                resp.headers["Content-Type"] = "application/json";
+            }
+        );
+        
+        // API routes with authentication (original style)
+        router.registerHandler("/api/users/:id", [](const http::Request& req, http::Response& resp) {
+            resp.body = "{\"user\": {\"id\": \"" + req.path.substr(req.path.find_last_of('/') + 1) + "\"}}\n";
+            resp.headers["Content-Type"] = "application/json";
         });
         
         // Example routes with path parameters
