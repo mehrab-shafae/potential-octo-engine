@@ -1,10 +1,15 @@
-BasedOnStyle: Google
+BasedOnStyle: LLVM
 IndentWidth: 4
-TabWidth: 8
 UseTab: Never
-ColumnLimit: 80
+ColumnLimit: 200
 AllowShortFunctionsOnASingleLine: Inline
-BreakBeforeBraces: Allman
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: false
+  AfterControlStatement: false
+  BeforeElse: false
+  BeforeCatch: false
+  BeforeWhile: false
 SpacesInParentheses: false
 SpacesInSquareBrackets: true
 SpaceBeforeParens: Never
@@ -21,3 +26,4 @@ PointerAlignment: Left
 Cpp11BracedListStyle: true
 DerivePointerAlignment: false
 ReflowComments: true
+IndentAccessModifiers: true
