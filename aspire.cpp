@@ -1,12 +1,18 @@
-// by MRB
+// by MRB - DPDK Version
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <liburing.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <rte_eal.h>
+#include <rte_ethdev.h>
+#include <rte_cycles.h>
+#include <rte_lcore.h>
+#include <rte_mbuf.h>
+#include <rte_mempool.h>
+#include <rte_ring.h>
+#include <rte_tcp.h>
+#include <rte_ip.h>
+#include <rte_ether.h>
+#include <rte_byteorder.h>
+#include <rte_timer.h>
+#include <rte_flow.h>
 
 #include <any>
 #include <array>
@@ -28,360 +34,329 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <signal.h>
+#include <atomic>
 
 namespace aspire {
 
 namespace config {
 
-struct SocketConfig {
-        bool tcpNodelay{true};
-        bool tcpQuickAck{true};
-        bool tcpCork{false};
-        bool tcpKeepAlive{true};
-        bool tcpWindowClamp{true};
-
-        int keepAliveTime{30};
-        int keepAliveInterval{5};
-        int keepAliveProbes{3};
-
-        int sendBufferSize{256 * 1024};
-        int recvBufferSize{256 * 1024};
-
-        size_t maxConnectionPoolSize{100};
-        size_t maxBufferPoolSize{1000};
-
-        int          port{8080};
-        int          backlog{128};
-        unsigned int queueDepth{1024};
-        unsigned int threads{0};
+struct DpdkConfig {
+    // DPDK specific settings
+    uint16_t portId{0};
+    uint16_t nbRxQueues{1};
+    uint16_t nbTxQueues{1};
+    uint16_t nbRxDesc{1024};
+    uint16_t nbTxDesc{1024};
+    
+    // Memory pool settings
+    uint32_t mbufPoolSize{8192};
+    uint32_t mbufCacheSize{250};
+    
+    // TCP settings
+    uint32_t tcpMaxConnections{10000};
+    uint32_t tcpTimeout{30};
+    
+    // Server settings
+    uint16_t serverPort{4556};
+    uint32_t maxConnections{10000};
+    uint32_t bufferPoolSize{1000};
 };
 
 class ConfigManager {
-    public:
-        static ConfigManager& instance() {
-            static ConfigManager inst;
-            return inst;
-        }
+public:
+    static ConfigManager& instance() {
+        static ConfigManager inst;
+        return inst;
+    }
 
-        SocketConfig&       getSocketConfig() { return socketConfig_; }
-        const SocketConfig& getSocketConfig() const { return socketConfig_; }
+    DpdkConfig& getDpdkConfig() { return dpdkConfig_; }
+    const DpdkConfig& getDpdkConfig() const { return dpdkConfig_; }
 
-        void setSocketConfig(const SocketConfig& config) { socketConfig_ = config; }
+    void setDpdkConfig(const DpdkConfig& config) { dpdkConfig_ = config; }
 
-        void setHighPerformance() {
-            socketConfig_.tcpNodelay     = true;
-            socketConfig_.tcpQuickAck    = true;
-            socketConfig_.tcpCork        = false;
-            socketConfig_.tcpKeepAlive   = true;
-            socketConfig_.tcpWindowClamp = true;
-            socketConfig_.sendBufferSize = 256 * 1024;
-            socketConfig_.recvBufferSize = 256 * 1024;
-        }
+    void setHighPerformance() {
+        dpdkConfig_.nbRxDesc = 2048;
+        dpdkConfig_.nbTxDesc = 2048;
+        dpdkConfig_.mbufPoolSize = 16384;
+        dpdkConfig_.tcpMaxConnections = 50000;
+    }
 
-        void setLowLatency() {
-            socketConfig_.tcpNodelay        = true;
-            socketConfig_.tcpQuickAck       = true;
-            socketConfig_.tcpCork           = false;
-            socketConfig_.keepAliveTime     = 15;
-            socketConfig_.keepAliveInterval = 3;
-            socketConfig_.keepAliveProbes   = 2;
-        }
+    void setLowLatency() {
+        dpdkConfig_.nbRxDesc = 512;
+        dpdkConfig_.nbTxDesc = 512;
+        dpdkConfig_.mbufCacheSize = 32;
+        dpdkConfig_.tcpTimeout = 15;
+    }
 
-        void setHighThroughput() {
-            socketConfig_.tcpNodelay     = false;
-            socketConfig_.tcpQuickAck    = false;
-            socketConfig_.tcpCork        = true;
-            socketConfig_.sendBufferSize = 512 * 1024;
-            socketConfig_.recvBufferSize = 512 * 1024;
-        }
+    void setHighThroughput() {
+        dpdkConfig_.nbRxDesc = 4096;
+        dpdkConfig_.nbTxDesc = 4096;
+        dpdkConfig_.mbufPoolSize = 32768;
+        dpdkConfig_.tcpMaxConnections = 100000;
+    }
 
-        void setConservative() {
-            socketConfig_.tcpNodelay     = false;
-            socketConfig_.tcpQuickAck    = false;
-            socketConfig_.tcpCork        = false;
-            socketConfig_.tcpKeepAlive   = false;
-            socketConfig_.tcpWindowClamp = false;
-            socketConfig_.sendBufferSize = 64 * 1024;
-            socketConfig_.recvBufferSize = 64 * 1024;
-        }
-
-    private:
-        SocketConfig socketConfig_;
+private:
+    DpdkConfig dpdkConfig_;
 };
 
 } // namespace config
 
 namespace util {
-class BufferPool {
-    public:
-        static BufferPool& instance() {
-            static BufferPool inst;
-            return inst;
-        }
 
-        char* acquire(std::size_t size = kBufSize) {
-            std::lock_guard<std::mutex> lock(m_);
-
-            auto& pool = getPoolForSize(size);
-            if(!pool.empty()) {
-                char* buf = pool.top();
-                pool.pop();
-                return buf;
-            }
-
-            return static_cast<char*>(std::aligned_alloc(64, size));
-        }
-
-        void release(char* buf, std::size_t size = kBufSize) {
-            if(!buf) return;
-            std::lock_guard<std::mutex> lock(m_);
-            auto&                       pool = getPoolForSize(size);
-            if(pool.size() < maxPoolSize_) {
-                pool.push(buf);
-            } else {
-                std::free(buf);
-            }
-        }
-
-        static constexpr std::size_t kBufSize      = 4096;
-        static constexpr std::size_t kSmallBufSize = 1024;
-        static constexpr std::size_t kLargeBufSize = 8192;
-        std::size_t                  maxPoolSize_{1000}; // Will be updated in constructor
-
-    private:
-        BufferPool() { maxPoolSize_ = config::ConfigManager::instance().getSocketConfig().maxBufferPoolSize; }
-        ~BufferPool() {
-            for(auto& pool : pools_) {
-                while(!pool.empty()) {
-                    std::free(pool.top());
-                    pool.pop();
-                }
-            }
-        }
-
-        std::stack<char*>& getPoolForSize(std::size_t size) {
-            if(size <= kSmallBufSize) return pools_[ 0 ];
-            if(size <= kBufSize) return pools_[ 1 ];
-            return pools_[ 2 ];
-        }
-
-        std::array<std::stack<char*>, 3> pools_; // small, medium, large
-        std::mutex                       m_;
-};
-} // namespace util
-
-namespace util {
-class Fd {
-    public:
-        Fd() = default;
-        explicit Fd(int fd) : fd_(fd) {}
-        ~Fd() { reset(); }
-
-        Fd(const Fd&)            = delete;
-        Fd& operator=(const Fd&) = delete;
-
-        Fd(Fd&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
-        Fd& operator=(Fd&& other) noexcept {
-            if(this != &other) {
-                reset();
-                fd_       = other.fd_;
-                other.fd_ = -1;
-            }
-            return *this;
-        }
-
-        int      get() const { return fd_; }
-        explicit operator int() const { return fd_; }
-        bool     valid() const { return fd_ >= 0; }
-
-        int release() {
-            int tmp = fd_;
-            fd_     = -1;
-            return tmp;
-        }
-
-        void reset(int newFd = -1) {
-            if(fd_ >= 0) { ::close(fd_); }
-            fd_ = newFd;
-        }
-
-    private:
-        int fd_{-1};
-};
-
+// Expected class for error handling
 template <typename T> class Expected {
-    public:
-        // Success
-        Expected(T&& val) : data_(std::make_unique<T>(std::move(val))) {}
+public:
+    // Success
+    Expected(T&& val) : data_(std::in_place_index<0>, std::move(val)) {}
 
-        Expected(const T&) = delete;
+    Expected(const T&) = delete;
 
-        // Failure
-        Expected(std::string err) : data_(std::move(err)) {}
+    // Failure
+    Expected(std::string err) : data_(std::in_place_index<1>, std::move(err)) {}
 
-        Expected(Expected&&) noexcept            = default;
-        Expected& operator=(Expected&&) noexcept = default;
+    Expected(Expected&&) noexcept = default;
+    Expected& operator=(Expected&&) noexcept = default;
 
-        bool     ok() const { return std::holds_alternative<std::unique_ptr<T>>(data_); }
-        T&       value() { return *std::get<std::unique_ptr<T>>(data_); }
-        const T& value() const { return *std::get<std::unique_ptr<T>>(data_); }
+    bool ok() const { return std::holds_alternative<T>(data_); }
+    T& value() { return std::get<T>(data_); }
+    const T& value() const { return std::get<T>(data_); }
 
-        // Move-out helper
-        T take() { return std::move(*std::get<std::unique_ptr<T>>(data_)); }
+    // Move-out helper
+    T take() { 
+        return std::move(std::get<T>(data_));
+    }
 
-        const std::string& error() const { return std::get<std::string>(data_); }
+    const std::string& error() const { return std::get<std::string>(data_); }
 
-    private:
-        std::variant<std::unique_ptr<T>, std::string> data_;
+private:
+    std::variant<T, std::string> data_;
 };
+
+// DPDK Buffer Pool
+class DpdkBufferPool {
+public:
+    static DpdkBufferPool& instance() {
+        static DpdkBufferPool inst;
+        return inst;
+    }
+
+    struct rte_mempool* getMbufPool() const { return mbufPool_; }
+    
+    struct rte_mbuf* acquireMbuf() {
+        return rte_pktmbuf_alloc(mbufPool_);
+    }
+
+    void releaseMbuf(struct rte_mbuf* mbuf) {
+        if (mbuf) rte_pktmbuf_free(mbuf);
+    }
+
+    ~DpdkBufferPool() {
+        if (mbufPool_) {
+            rte_mempool_free(mbufPool_);
+        }
+    }
+
+private:
+    DpdkBufferPool() {
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        mbufPool_ = rte_pktmbuf_pool_create("mbuf_pool", 
+                                           config.mbufPoolSize,
+                                           config.mbufCacheSize, 
+                                           0, 
+                                           RTE_MBUF_DEFAULT_BUF_SIZE, 
+                                           rte_socket_id());
+        if (!mbufPool_) {
+            throw std::runtime_error("Failed to create mbuf pool");
+        }
+    }
+
+    struct rte_mempool* mbufPool_{nullptr};
+};
+
+// DPDK Connection State
+struct DpdkConnection {
+    uint32_t srcIp;
+    uint16_t srcPort;
+    uint32_t dstIp;
+    uint16_t dstPort;
+    
+    // TCP state
+    uint32_t seqNum;
+    uint32_t ackNum;
+    uint8_t tcpState; // SYN_SENT, ESTABLISHED, etc.
+    
+    // HTTP state
+    std::string incomingData;
+    std::string outgoingData;
+    bool keepAlive{false};
+    
+    // Timestamp for timeout
+    uint64_t lastActivity;
+    
+    DpdkConnection() : seqNum(0), ackNum(0), tcpState(0), lastActivity(0) {}
+};
+
+// DPDK Connection Pool
+class DpdkConnectionPool {
+public:
+    static DpdkConnectionPool& instance() {
+        static DpdkConnectionPool inst;
+        return inst;
+    }
+
+    DpdkConnection* acquire(uint32_t srcIp, uint16_t srcPort, uint32_t dstIp, uint16_t dstPort) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Check if connection already exists
+        uint64_t key = makeConnectionKey(srcIp, srcPort, dstIp, dstPort);
+        auto it = connections_.find(key);
+        if (it != connections_.end()) {
+            it->second->lastActivity = rte_get_tsc_cycles();
+            return it->second.get();
+        }
+        
+        // Create new connection
+        auto conn = std::make_unique<DpdkConnection>();
+        conn->srcIp = srcIp;
+        conn->srcPort = srcPort;
+        conn->dstIp = dstIp;
+        conn->dstPort = dstPort;
+        conn->lastActivity = rte_get_tsc_cycles();
+        
+        DpdkConnection* ptr = conn.get();
+        connections_[key] = std::move(conn);
+        
+        return ptr;
+    }
+
+    void cleanup() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t now = rte_get_tsc_cycles();
+        uint64_t timeout = config::ConfigManager::instance().getDpdkConfig().tcpTimeout * rte_get_tsc_hz();
+        
+        auto it = connections_.begin();
+        while (it != connections_.end()) {
+            if (now - it->second->lastActivity > timeout) {
+                it = connections_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    size_t getConnectionCount() const {
+        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(mutex_));
+        return connections_.size();
+    }
+
+private:
+    uint64_t makeConnectionKey(uint32_t srcIp, uint16_t srcPort, uint32_t dstIp, uint16_t dstPort) {
+        return (static_cast<uint64_t>(srcIp) << 32) | srcPort |
+               (static_cast<uint64_t>(dstIp) << 48) | (static_cast<uint64_t>(dstPort) << 32);
+    }
+
+    std::unordered_map<uint64_t, std::unique_ptr<DpdkConnection>> connections_;
+    std::mutex mutex_;
+};
+
 } // namespace util
 
 // --------------------------- http namespace -----------------------------
 namespace http {
 
 struct Request {
-        std::string                                  method;
-        std::string                                  path;
-        std::string                                  version;
-        std::unordered_map<std::string, std::string> headers;
-        std::string                                  body;
-
-        std::size_t contentLength{0};
-        bool        connectionClose{false};
+    std::string method;
+    std::string path;
+    std::string version;
+    std::unordered_map<std::string, std::string> headers;
+    std::string body;
+    std::size_t contentLength{0};
+    bool connectionClose{false};
 };
 
 class Response {
-    public:
-        int                                          statusCode{200};
-        std::string                                  statusMessage{"OK"};
-        std::unordered_map<std::string, std::string> headers;
-        std::string                                  body;
+public:
+    int statusCode{200};
+    std::string statusMessage{"OK"};
+    std::unordered_map<std::string, std::string> headers;
+    std::string body;
 
-        struct IoVecResponse {
-                std::vector<struct iovec> iovecs;
-                std::vector<std::string>  strings;
-
-                void add(const std::string& str) {
-                    strings.push_back(str);
-                    struct iovec vec;
-                    vec.iov_base = const_cast<char*>(strings.back().data());
-                    vec.iov_len  = strings.back().length();
-                    iovecs.push_back(vec);
-                }
-
-                void clear() {
-                    iovecs.clear();
-                    strings.clear();
-                }
-        };
-
-        IoVecResponse toIoVec() const {
-            IoVecResponse result;
-
-            // HTTP status line
-            std::string statusLine = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusMessage + "\r\n";
-            result.add(statusLine);
-
-            // Headers
-            for(const auto& [ k, v ] : headers) {
-                std::string header = k + ": " + v + "\r\n";
-                result.add(header);
-            }
-
-            // Content-Length header
-            std::string contentLength = "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
-            result.add(contentLength);
-
-            // Body
-            if(!body.empty()) { result.add(body); }
-
-            return result;
-        }
-
-        std::string serialize() const {
-            // Pre-calculate size to avoid reallocations
-            size_t totalSize = 0;
-            totalSize += 16; // "HTTP/1.1 XXX "
-            totalSize += statusMessage.length();
-            totalSize += 2; // "\r\n"
-
-            for(const auto& [ k, v ] : headers) {
-                totalSize += k.length() + 2; // ": "
-                totalSize += v.length() + 2; // "\r\n"
-            }
-
-            totalSize += 21; // "Content-Length: "
-            totalSize += std::to_string(body.size()).length();
-            totalSize += 4; // "\r\n\r\n"
-            totalSize += body.size();
-
-            std::string result;
-            result.reserve(totalSize);
-
-            result += "HTTP/1.1 ";
-            result += std::to_string(statusCode);
-            result += ' ';
-            result += statusMessage;
+    std::string serialize() const {
+        std::string result;
+        result.reserve(1024); // Pre-allocate
+        
+        result += "HTTP/1.1 ";
+        result += std::to_string(statusCode);
+        result += ' ';
+        result += statusMessage;
+        result += "\r\n";
+        
+        for (const auto& [k, v] : headers) {
+            result += k;
+            result += ": ";
+            result += v;
             result += "\r\n";
-
-            for(const auto& [ k, v ] : headers) {
-                result += k;
-                result += ": ";
-                result += v;
-                result += "\r\n";
-            }
-
-            result += "Content-Length: ";
-            result += std::to_string(body.size());
-            result += "\r\n\r\n";
-            result += body;
-
-            return result;
         }
+        
+        result += "Content-Length: ";
+        result += std::to_string(body.size());
+        result += "\r\n\r\n";
+        result += body;
+        
+        return result;
+    }
 };
 
 class Context {
-    public:
-        Request&  req;
-        Response& res;
+public:
+    Request& req;
+    Response& res;
+    std::unordered_map<std::string, std::string> params;
+    std::unordered_map<std::string, std::any> data;
 
-        // Shared data between middleware
-        std::unordered_map<std::string, std::string> params;
-        std::unordered_map<std::string, std::any>    data;
+    Context(Request& request, Response& response) : req(request), res(response) {}
 
-        Context(Request& request, Response& response) : req(request), res(response) {}
+    void setStatus(int code, const std::string& message = "") {
+        res.statusCode = code;
+        if (!message.empty()) res.statusMessage = message;
+    }
 
-        // Helper methods for common operations
-        void setStatus(int code, const std::string& message = "") {
-            res.statusCode = code;
-            if(!message.empty()) { res.statusMessage = message; }
-        }
+    void setHeader(const std::string& key, const std::string& value) {
+        res.headers[key] = value;
+    }
 
-        void setHeader(const std::string& key, const std::string& value) { res.headers[ key ] = value; }
+    void setBody(const std::string& body) {
+        res.body = body;
+    }
 
-        void setBody(const std::string& body) { res.body = body; }
+    std::string getParam(const std::string& key) const {
+        auto it = params.find(key);
+        return it != params.end() ? it->second : "";
+    }
 
-        std::string getParam(const std::string& key) const {
-            auto it = params.find(key);
-            return it != params.end() ? it->second : "";
-        }
+    std::string getHeader(const std::string& key) const {
+        auto it = req.headers.find(key);
+        return it != req.headers.end() ? it->second : "";
+    }
 
-        std::string getHeader(const std::string& key) const {
-            auto it = req.headers.find(key);
-            return it != req.headers.end() ? it->second : "";
-        }
+    template<typename T>
+    void setData(const std::string& key, T&& value) {
+        data[key] = std::forward<T>(value);
+    }
 
-        template <typename T> void setData(const std::string& key, T&& value) { data[ key ] = std::forward<T>(value); }
-
-        template <typename T> T* getData(const std::string& key) {
-            auto it = data.find(key);
-            if(it != data.end()) {
-                try {
-                    return std::any_cast<T>(&it->second);
-                } catch(...) { return nullptr; }
+    template<typename T>
+    T* getData(const std::string& key) {
+        auto it = data.find(key);
+        if (it != data.end()) {
+            try {
+                return std::any_cast<T>(&it->second);
+            } catch(...) {
+                return nullptr;
             }
-            return nullptr;
         }
+        return nullptr;
+    }
 };
 
 // Middleware function type
@@ -389,18 +364,19 @@ using Middleware = std::function<void(Context&, std::function<void()>)>;
 
 // Middleware types
 enum class MiddlewareType {
-    Global, // Applied to all routes
-    Route,  // Applied to specific routes
-    Error   // Error handling middleware
+    Global,
+    Route,
+    Error
 };
 
 // Middleware entry
 struct MiddlewareEntry {
-        Middleware     middleware;
-        MiddlewareType type;
-        std::string    path; // For route-specific middleware
+    Middleware middleware;
+    MiddlewareType type;
+    std::string path;
 
-        MiddlewareEntry(Middleware m, MiddlewareType t, std::string p = "") : middleware(std::move(m)), type(t), path(std::move(p)) {}
+    MiddlewareEntry(Middleware m, MiddlewareType t, std::string p = "") 
+        : middleware(std::move(m)), type(t), path(std::move(p)) {}
 };
 
 // Next function type for middleware chain
@@ -408,112 +384,128 @@ using NextFunction = std::function<void()>;
 
 // Middleware chain executor
 class MiddlewareChain {
-    public:
-        static void execute(const std::vector<MiddlewareEntry>& middleware, Context& ctx, std::function<void()> finalHandler) {
-            if(middleware.empty()) {
-                finalHandler();
-                return;
-            }
+public:
+    static void execute(const std::vector<MiddlewareEntry>& middleware, Context& ctx, std::function<void()> finalHandler) {
+        if (middleware.empty()) {
+            finalHandler();
+            return;
+        }
+        executeNext(middleware.begin(), middleware.end(), ctx, finalHandler);
+    }
 
-            executeNext(middleware.begin(), middleware.end(), ctx, finalHandler);
+private:
+    static void executeNext(std::vector<MiddlewareEntry>::const_iterator current, 
+                           std::vector<MiddlewareEntry>::const_iterator end, 
+                           Context& ctx, std::function<void()> finalHandler) {
+        if (current == end) {
+            finalHandler();
+            return;
         }
 
-    private:
-        static void executeNext(std::vector<MiddlewareEntry>::const_iterator current, std::vector<MiddlewareEntry>::const_iterator end, Context& ctx, std::function<void()> finalHandler) {
-            if(current == end) {
-                finalHandler();
-                return;
-            }
+        auto next = [current, end, &ctx, finalHandler]() mutable {
+            executeNext(++current, end, ctx, finalHandler);
+        };
 
-            auto next = [ current, end, &ctx, finalHandler ]() mutable { executeNext(++current, end, ctx, finalHandler); };
-
-            current->middleware(ctx, next);
-        }
+        current->middleware(ctx, next);
+    }
 };
 
 enum class ParseResult { Incomplete, Complete, Error };
 
 inline ParseResult parseRequest(const std::string& buffer, Request& req, std::size_t& consumed) {
     const std::string_view delimiter = "\r\n\r\n";
-    auto                   pos       = buffer.find(delimiter);
-    if(pos == std::string::npos) { return ParseResult::Incomplete; }
+    auto pos = buffer.find(delimiter);
+    if (pos == std::string_view::npos) {
+        return ParseResult::Incomplete;
+    }
 
-    // Headers end position
     consumed = pos + delimiter.size();
-
     std::string_view headerSection(buffer.data(), pos);
 
     // Parse start line
     auto lineEnd = headerSection.find('\n');
-    if(lineEnd == std::string_view::npos) { return ParseResult::Error; }
+    if (lineEnd == std::string_view::npos) {
+        return ParseResult::Error;
+    }
 
     std::string_view startLine = headerSection.substr(0, lineEnd);
-    if(startLine.back() == '\r') { startLine = startLine.substr(0, startLine.length() - 1); }
+    if (startLine.back() == '\r') {
+        startLine = startLine.substr(0, startLine.length() - 1);
+    }
 
-    // Parse method, path, version using string_view for zero-copy
     auto space1 = startLine.find(' ');
-    if(space1 == std::string_view::npos) return ParseResult::Error;
+    if (space1 == std::string_view::npos) return ParseResult::Error;
 
     auto space2 = startLine.find(' ', space1 + 1);
-    if(space2 == std::string_view::npos) return ParseResult::Error;
+    if (space2 == std::string_view::npos) return ParseResult::Error;
 
-    req.method  = std::string(startLine.substr(0, space1));
-    req.path    = std::string(startLine.substr(space1 + 1, space2 - space1 - 1));
+    req.method = std::string(startLine.substr(0, space1));
+    req.path = std::string(startLine.substr(space1 + 1, space2 - space1 - 1));
     req.version = std::string(startLine.substr(space2 + 1));
 
-    // Parse headers with optimized string handling
+    // Parse headers
     std::string_view remaining = headerSection.substr(lineEnd + 1);
-    req.headers.clear(); // Reuse existing map
+    req.headers.clear();
 
-    while(!remaining.empty()) {
+    while (!remaining.empty()) {
         auto lineEnd = remaining.find('\n');
-        if(lineEnd == std::string_view::npos) break;
+        if (lineEnd == std::string_view::npos) break;
 
         std::string_view line = remaining.substr(0, lineEnd);
-        if(line.back() == '\r') { line = line.substr(0, line.length() - 1); }
+        if (line.back() == '\r') {
+            line = line.substr(0, line.length() - 1);
+        }
 
-        if(line.empty()) break;
+        if (line.empty()) break;
 
         auto colon = line.find(':');
-        if(colon != std::string_view::npos) {
-            std::string_view key   = line.substr(0, colon);
+        if (colon != std::string_view::npos) {
+            std::string_view key = line.substr(0, colon);
             std::string_view value = line.substr(colon + 1);
 
-            // Trim leading space efficiently
-            while(!value.empty() && value.front() == ' ') { value = value.substr(1); }
+            while (!value.empty() && value.front() == ' ') {
+                value = value.substr(1);
+            }
 
-            // Convert to lowercase for case-insensitive comparison
             std::string lowerKey;
             lowerKey.reserve(key.size());
-            for(char c : key) { lowerKey += std::tolower(c); }
+            for (char c : key) {
+                lowerKey += std::tolower(c);
+            }
 
-            req.headers[ std::move(lowerKey) ] = std::string(value);
+            req.headers[std::move(lowerKey)] = std::string(value);
         }
 
         remaining = remaining.substr(lineEnd + 1);
     }
 
-    // Content-Length with optimized lookup
+    // Content-Length
     req.contentLength = 0;
-    auto itCL         = req.headers.find("content-length");
-    if(itCL != req.headers.end()) {
+    auto itCL = req.headers.find("content-length");
+    if (itCL != req.headers.end()) {
         try {
             req.contentLength = std::stoul(itCL->second);
-        } catch(...) { return ParseResult::Error; }
+        } catch(...) {
+            return ParseResult::Error;
+        }
     }
 
-    // Connection header with optimized comparison
+    // Connection header
     req.connectionClose = false;
-    auto itConn         = req.headers.find("connection");
-    if(itConn != req.headers.end()) {
+    auto itConn = req.headers.find("connection");
+    if (itConn != req.headers.end()) {
         const std::string& v = itConn->second;
-        if(v == "close") req.connectionClose = true;
+        if (v == "close") req.connectionClose = true;
     }
 
     std::size_t totalNeeded = consumed + req.contentLength;
-    if(buffer.size() < totalNeeded) { return ParseResult::Incomplete; }
+    if (buffer.size() < totalNeeded) {
+        return ParseResult::Incomplete;
+    }
 
-    if(req.contentLength > 0) { req.body = buffer.substr(consumed, req.contentLength); }
+    if (req.contentLength > 0) {
+        req.body = buffer.substr(consumed, req.contentLength);
+    }
 
     consumed = totalNeeded;
     return ParseResult::Complete;
@@ -523,1003 +515,661 @@ using Handler = std::function<void(const Request&, Response&)>;
 
 // Radix Tree Node for efficient path matching
 struct RadixNode {
-        std::string                             path;
-        Handler                                 handler;
-        std::vector<std::unique_ptr<RadixNode>> children;
+    std::string path;
+    Handler handler;
+    std::vector<std::unique_ptr<RadixNode>> children;
+    bool isParam{false};
+    std::string paramName;
+    std::unordered_map<char, RadixNode*> charMap;
 
-        // Path parameter support
-        bool        isParam{false};
-        std::string paramName;
+    RadixNode() = default;
+    explicit RadixNode(std::string p) : path(std::move(p)) {}
 
-        // Fast lookup optimization
-        std::unordered_map<char, RadixNode*> charMap;
-
-        RadixNode() = default;
-        explicit RadixNode(std::string p) : path(std::move(p)) {}
-
-        // Pre-compute character map for faster lookups
-        void buildCharMap() {
-            charMap.clear();
-            for(auto& child : children) {
-                if(!child->path.empty()) { charMap[ child->path[ 0 ] ] = child.get(); }
+    void buildCharMap() {
+        charMap.clear();
+        for (auto& child : children) {
+            if (!child->path.empty()) {
+                charMap[child->path[0]] = child.get();
             }
         }
+    }
 };
 
 class Router {
-    public:
-        static Router& instance() {
-            static Router r;
-            return r;
-        }
+public:
+    static Router& instance() {
+        static Router r;
+        return r;
+    }
 
-        // Register middleware
-        void use(Middleware middleware) { middleware_.emplace_back(std::move(middleware), MiddlewareType::Global); }
+    void use(Middleware middleware) {
+        middleware_.emplace_back(std::move(middleware), MiddlewareType::Global);
+    }
 
-        void use(const std::string& path, Middleware middleware) { middleware_.emplace_back(std::move(middleware), MiddlewareType::Route, path); }
+    void use(const std::string& path, Middleware middleware) {
+        middleware_.emplace_back(std::move(middleware), MiddlewareType::Route, path);
+    }
 
-        void useError(Middleware middleware) { errorMiddleware_.emplace_back(std::move(middleware)); }
+    void useError(Middleware middleware) {
+        errorMiddleware_.emplace_back(std::move(middleware));
+    }
 
-        void registerHandler(const std::string& path, Handler h) {
-            insertRoute(&root_, path, 0, std::move(h));
-            rebuildCharMaps(&root_);
-        }
+    void registerHandler(const std::string& path, Handler h) {
+        insertRoute(&root_, path, 0, std::move(h));
+        rebuildCharMaps(&root_);
+    }
 
-        // Register handler with multiple middleware (Express.js style)
-        void registerHandler(const std::string& path, const std::vector<Middleware>& middleware, Handler h) {
-            // Create a composite handler that executes middleware chain + final
-            // handler
-            auto compositeHandler = [ this, middleware, h = std::move(h) ](const Request& req, Response& res) {
-                Context ctx(const_cast<Request&>(req), res);
+    void registerHandler(const std::string& path, const std::vector<Middleware>& middleware, Handler h) {
+        auto compositeHandler = [this, middleware, h = std::move(h)](const Request& req, Response& res) {
+            Context ctx(const_cast<Request&>(req), res);
+            auto routeMatch = this->findWithParams(req.path);
+            ctx.params = routeMatch.params;
 
-                // Find route parameters
-                auto routeMatch = this->findWithParams(req.path);
-                ctx.params      = routeMatch.params;
-
-                auto finalHandler = [ &ctx, &h ]() { h(ctx.req, ctx.res); };
-
-                // Convert middleware vector to MiddlewareEntry vector
-                std::vector<MiddlewareEntry> middlewareEntries;
-                for(const auto& m : middleware) { middlewareEntries.emplace_back(m, MiddlewareType::Global); }
-
-                // Execute middleware chain
-                MiddlewareChain::execute(middlewareEntries, ctx, finalHandler);
+            auto finalHandler = [&ctx, &h]() {
+                h(ctx.req, ctx.res);
             };
 
-            insertRoute(&root_, path, 0, std::move(compositeHandler));
-            rebuildCharMaps(&root_);
-        }
+            std::vector<MiddlewareEntry> middlewareEntries;
+            for (const auto& m : middleware) {
+                middlewareEntries.emplace_back(m, MiddlewareType::Global);
+            }
 
-        // Register handler with single middleware
-        void registerHandler(const std::string& path, Middleware middleware, Handler h) { registerHandler(path, std::vector<Middleware>{std::move(middleware)}, std::move(h)); }
-
-        Handler find(const std::string& path) const { return findRoute(&root_, path, 0); }
-
-        // Enhanced find with path parameters
-        struct RouteMatch {
-                Handler                                      handler;
-                std::unordered_map<std::string, std::string> params;
+            MiddlewareChain::execute(middlewareEntries, ctx, finalHandler);
         };
 
-        RouteMatch findWithParams(const std::string& path) const {
-            RouteMatch match;
-            match.handler = findRouteWithParams(&root_, path, 0, match.params);
-            return match;
+        insertRoute(&root_, path, 0, std::move(compositeHandler));
+        rebuildCharMaps(&root_);
+    }
+
+    void registerHandler(const std::string& path, Middleware middleware, Handler h) {
+        registerHandler(path, std::vector<Middleware>{std::move(middleware)}, std::move(h));
+    }
+
+    Handler find(const std::string& path) const {
+        return findRoute(&root_, path, 0);
+    }
+
+    struct RouteMatch {
+        Handler handler;
+        std::unordered_map<std::string, std::string> params;
+    };
+
+    RouteMatch findWithParams(const std::string& path) const {
+        RouteMatch match;
+        match.handler = findRouteWithParams(&root_, path, 0, match.params);
+        return match;
+    }
+
+    void executeRequest(Request& req, Response& res) {
+        Context ctx(req, res);
+
+        std::vector<MiddlewareEntry> applicableMiddleware;
+
+        for (const auto& entry : middleware_) {
+            if (entry.type == MiddlewareType::Global) {
+                applicableMiddleware.push_back(entry);
+            }
         }
 
-        // Execute middleware chain with route handler
-        void executeRequest(Request& req, Response& res) {
-            Context ctx(req, res);
+        for (const auto& entry : middleware_) {
+            if (entry.type == MiddlewareType::Route && 
+                (entry.path.empty() || req.path.find(entry.path) == 0)) {
+                applicableMiddleware.push_back(entry);
+            }
+        }
 
-            // Collect applicable middleware
-            std::vector<MiddlewareEntry> applicableMiddleware;
+        auto routeMatch = findWithParams(req.path);
+        ctx.params = routeMatch.params;
 
-            // Add global middleware
-            for(const auto& entry : middleware_) {
-                if(entry.type == MiddlewareType::Global) { applicableMiddleware.push_back(entry); }
+        auto finalHandler = [&ctx, &routeMatch]() {
+            if (routeMatch.handler) {
+                routeMatch.handler(ctx.req, ctx.res);
+            } else {
+                ctx.setStatus(404, "Not Found");
+                ctx.setBody("404 Not Found\n");
+                ctx.setHeader("Content-Type", "text/plain");
+            }
+        };
+
+        MiddlewareChain::execute(applicableMiddleware, ctx, finalHandler);
+    }
+
+private:
+    RadixNode root_;
+    std::vector<MiddlewareEntry> middleware_;
+    std::vector<Middleware> errorMiddleware_;
+
+    void rebuildCharMaps(RadixNode* node) {
+        node->buildCharMap();
+        for (auto& child : node->children) {
+            rebuildCharMaps(child.get());
+        }
+    }
+
+    void insertRoute(RadixNode* node, const std::string& path, size_t pos, Handler h) {
+        if (pos >= path.length()) {
+            node->handler = std::move(h);
+            return;
+        }
+
+        if (path[pos] == ':') {
+            auto slashPos = path.find('/', pos);
+            if (slashPos == std::string::npos) slashPos = path.length();
+
+            std::string paramName = path.substr(pos + 1, slashPos - pos - 1);
+            std::string remainingPath = path.substr(slashPos);
+
+            auto paramNode = std::make_unique<RadixNode>("");
+            paramNode->isParam = true;
+            paramNode->paramName = paramName;
+
+            if (slashPos < path.length()) {
+                insertRoute(paramNode.get(), path, slashPos, std::move(h));
+            } else {
+                paramNode->handler = std::move(h);
             }
 
-            // Add route-specific middleware
-            for(const auto& entry : middleware_) {
-                if(entry.type == MiddlewareType::Route && (entry.path.empty() || req.path.find(entry.path) == 0)) { applicableMiddleware.push_back(entry); }
+            node->children.push_back(std::move(paramNode));
+            return;
+        }
+
+        char firstChar = pos < path.length() ? path[pos] : '\0';
+        auto it = node->charMap.find(firstChar);
+        if (it != node->charMap.end()) {
+            RadixNode* child = it->second;
+            size_t common = 0;
+            while (common < child->path.length() && pos + common < path.length() && 
+                   child->path[common] == path[pos + common]) {
+                common++;
             }
 
-            // Find route handler
-            auto routeMatch = findWithParams(req.path);
-            ctx.params      = routeMatch.params;
-
-            auto finalHandler = [ &ctx, &routeMatch ]() {
-                if(routeMatch.handler) {
-                    routeMatch.handler(ctx.req, ctx.res);
+            if (common > 0) {
+                if (common == child->path.length()) {
+                    insertRoute(child, path, pos + common, std::move(h));
+                    return;
                 } else {
-                    ctx.setStatus(404, "Not Found");
-                    ctx.setBody("404 Not Found\n");
-                    ctx.setHeader("Content-Type", "text/plain");
+                    auto newChild = std::make_unique<RadixNode>(child->path.substr(common));
+                    newChild->handler = std::move(child->handler);
+                    newChild->children = std::move(child->children);
+                    newChild->isParam = child->isParam;
+                    newChild->paramName = child->paramName;
+
+                    child->path = child->path.substr(0, common);
+                    child->children.clear();
+                    child->children.push_back(std::move(newChild));
+
+                    insertRoute(child, path, pos + common, std::move(h));
+                    return;
                 }
-            };
-
-            // Execute middleware chain
-            MiddlewareChain::execute(applicableMiddleware, ctx, finalHandler);
-        }
-
-    private:
-        RadixNode                    root_;
-        std::vector<MiddlewareEntry> middleware_;
-        std::vector<Middleware>      errorMiddleware_;
-
-        void rebuildCharMaps(RadixNode* node) {
-            node->buildCharMap();
-            for(auto& child : node->children) { rebuildCharMaps(child.get()); }
-        }
-
-        void insertRoute(RadixNode* node, const std::string& path, size_t pos, Handler h) {
-            if(pos >= path.length()) {
-                node->handler = std::move(h);
-                return;
             }
+        }
 
-            // Check for path parameters (e.g., /users/:id)
-            if(path[ pos ] == ':') {
+        auto newChild = std::make_unique<RadixNode>(path.substr(pos));
+        newChild->handler = std::move(h);
+        node->children.push_back(std::move(newChild));
+    }
+
+    Handler findRoute(const RadixNode* node, const std::string& path, size_t pos) const {
+        if (pos >= path.length()) {
+            return node->handler;
+        }
+
+        char firstChar = path[pos];
+        auto it = node->charMap.find(firstChar);
+        if (it != node->charMap.end()) {
+            const RadixNode* child = it->second;
+            if (pos + child->path.length() <= path.length() && 
+                path.substr(pos, child->path.length()) == child->path) {
+                return findRoute(child, path, pos + child->path.length());
+            }
+        }
+
+        return nullptr;
+    }
+
+    Handler findRouteWithParams(const RadixNode* node, const std::string& path, size_t pos, 
+                               std::unordered_map<std::string, std::string>& params) const {
+        if (pos >= path.length()) {
+            return node->handler;
+        }
+
+        char firstChar = path[pos];
+        auto it = node->charMap.find(firstChar);
+        if (it != node->charMap.end()) {
+            const RadixNode* child = it->second;
+            if (pos + child->path.length() <= path.length() && 
+                path.substr(pos, child->path.length()) == child->path) {
+                return findRouteWithParams(child, path, pos + child->path.length(), params);
+            }
+        }
+
+        for (const auto& child : node->children) {
+            if (child->isParam) {
                 auto slashPos = path.find('/', pos);
-                if(slashPos == std::string::npos) slashPos = path.length();
+                if (slashPos == std::string::npos) slashPos = path.length();
 
-                std::string paramName     = path.substr(pos + 1, slashPos - pos - 1);
-                std::string remainingPath = path.substr(slashPos);
+                std::string paramValue = path.substr(pos, slashPos - pos);
+                params[child->paramName] = paramValue;
 
-                // Create parameter node
-                auto paramNode       = std::make_unique<RadixNode>("");
-                paramNode->isParam   = true;
-                paramNode->paramName = paramName;
-
-                if(slashPos < path.length()) {
-                    insertRoute(paramNode.get(), path, slashPos, std::move(h));
+                if (slashPos < path.length()) {
+                    return findRouteWithParams(child.get(), path, slashPos, params);
                 } else {
-                    paramNode->handler = std::move(h);
-                }
-
-                node->children.push_back(std::move(paramNode));
-                return;
-            }
-
-            // Find matching child using character map for O(1) lookup
-            char firstChar = pos < path.length() ? path[ pos ] : '\0';
-            auto it        = node->charMap.find(firstChar);
-            if(it != node->charMap.end()) {
-                RadixNode* child  = it->second;
-                size_t     common = 0;
-                while(common < child->path.length() && pos + common < path.length() && child->path[ common ] == path[ pos + common ]) { common++; }
-
-                if(common > 0) {
-                    if(common == child->path.length()) {
-                        // Full match, continue with child
-                        insertRoute(child, path, pos + common, std::move(h));
-                        return;
-                    } else {
-                        // Partial match, split node
-                        auto newChild       = std::make_unique<RadixNode>(child->path.substr(common));
-                        newChild->handler   = std::move(child->handler);
-                        newChild->children  = std::move(child->children);
-                        newChild->isParam   = child->isParam;
-                        newChild->paramName = child->paramName;
-
-                        child->path = child->path.substr(0, common);
-                        child->children.clear();
-                        child->children.push_back(std::move(newChild));
-
-                        insertRoute(child, path, pos + common, std::move(h));
-                        return;
-                    }
+                    return child->handler;
                 }
             }
-
-            // No match found, create new child
-            auto newChild     = std::make_unique<RadixNode>(path.substr(pos));
-            newChild->handler = std::move(h);
-            node->children.push_back(std::move(newChild));
         }
 
-        Handler findRoute(const RadixNode* node, const std::string& path, size_t pos) const {
-            if(pos >= path.length()) { return node->handler; }
-
-            // Use character map for faster lookup
-            char firstChar = path[ pos ];
-            auto it        = node->charMap.find(firstChar);
-            if(it != node->charMap.end()) {
-                const RadixNode* child = it->second;
-                if(pos + child->path.length() <= path.length() && path.substr(pos, child->path.length()) == child->path) { return findRoute(child, path, pos + child->path.length()); }
-            }
-
-            return nullptr;
-        }
-
-        Handler findRouteWithParams(const RadixNode* node, const std::string& path, size_t pos, std::unordered_map<std::string, std::string>& params) const {
-            if(pos >= path.length()) { return node->handler; }
-
-            // Try exact matches first
-            char firstChar = path[ pos ];
-            auto it        = node->charMap.find(firstChar);
-            if(it != node->charMap.end()) {
-                const RadixNode* child = it->second;
-                if(pos + child->path.length() <= path.length() && path.substr(pos, child->path.length()) == child->path) {
-                    return findRouteWithParams(child, path, pos + child->path.length(), params);
-                }
-            }
-
-            // Try parameter nodes
-            for(const auto& child : node->children) {
-                if(child->isParam) {
-                    auto slashPos = path.find('/', pos);
-                    if(slashPos == std::string::npos) slashPos = path.length();
-
-                    std::string paramValue     = path.substr(pos, slashPos - pos);
-                    params[ child->paramName ] = paramValue;
-
-                    if(slashPos < path.length()) {
-                        return findRouteWithParams(child.get(), path, slashPos, params);
-                    } else {
-                        return child->handler;
-                    }
-                }
-            }
-
-            return nullptr;
-        }
+        return nullptr;
+    }
 };
 
 } // namespace http
 
-// --------------------------- engine::IoUringEngine ----------------------
-namespace engine {
+// --------------------------- dpdk namespace ----------------------------
+namespace dpdk {
 
-class IoUringEngine {
-    public:
-        // Prefer using create() which returns util::Expected instead of throwing.
-        explicit IoUringEngine(unsigned int queueDepth = 1024);
+// Global signal handler
+static std::atomic<bool> g_running{true};
 
-        static util::Expected<IoUringEngine> create(unsigned int queueDepth = 1024);
-
-        ~IoUringEngine() {
-            if(ring_.ring_fd >= 0) { io_uring_queue_exit(&ring_); }
-        }
-
-        IoUringEngine(const IoUringEngine&)            = delete;
-        IoUringEngine& operator=(const IoUringEngine&) = delete;
-
-        IoUringEngine(IoUringEngine&& other) noexcept : ring_(other.ring_), queueDepth_(other.queueDepth_) { other.ring_.ring_fd = -1; }
-        IoUringEngine& operator=(IoUringEngine&& other) noexcept {
-            if(this != &other) {
-                if(ring_.ring_fd >= 0) { io_uring_queue_exit(&ring_); }
-                ring_               = other.ring_;
-                queueDepth_         = other.queueDepth_;
-                other.ring_.ring_fd = -1;
-            }
-            return *this;
-        }
-
-        struct CompletionContext {
-                void (*handler)(IoUringEngine&, struct io_uring_cqe*, void*);
-                void* data;
-        };
-
-        void run() {
-            running_ = true;
-            while(running_) {
-                struct io_uring_cqe* cqe = nullptr;
-                int                  ret = io_uring_wait_cqe(&ring_, &cqe);
-                if(ret < 0) {
-                    if(ret == -EINTR) continue;
-                    throw std::runtime_error("io_uring_wait_cqe failed");
-                }
-                auto* ctx = reinterpret_cast<CompletionContext*>(cqe->user_data);
-                if(ctx && ctx->handler) {
-                    ctx->handler(*this, cqe, ctx->data);
-                    delete ctx;
-                }
-                io_uring_cqe_seen(&ring_, cqe);
-            }
-        }
-
-        void stop() { running_ = false; }
-
-        struct io_uring* handle() { return &ring_; }
-
-    private:
-        struct io_uring ring_{};
-        unsigned int    queueDepth_{};
-        bool            running_{false};
-};
-
-// ---------------- IoUringEngine definitions ----------------
-inline engine::IoUringEngine::IoUringEngine(unsigned int queueDepth) : queueDepth_(queueDepth) {
-    if(io_uring_queue_init(queueDepth_, &ring_, 0) < 0) {
-        // Mark as invalid; caller should check via create().
-        ring_.ring_fd = -1;
+void signalHandler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        std::cout << "\nReceived signal " << signal << ", shutting down gracefully..." << std::endl;
+        g_running = false;
     }
 }
 
-inline util::Expected<engine::IoUringEngine> engine::IoUringEngine::create(unsigned int queueDepth) {
-    IoUringEngine eng(queueDepth);
-    if(eng.ring_.ring_fd < 0) { return std::string{"io_uring_queue_init failed"}; }
-    return eng;
-}
+class DpdkEngine {
+public:
+    static util::Expected<DpdkEngine> create() {
+        DpdkEngine engine;
+        if (!engine.initialize()) {
+            return std::string("Failed to initialize DPDK engine");
+        }
+        return engine;
+    }
 
-} // namespace engine
+    ~DpdkEngine() {
+        cleanup();
+    }
 
-// --------------------------- transport namespace ------------------------
-namespace transport {
-using aspire::engine::IoUringEngine;
-using aspire::http::parseRequest;
-using aspire::http::ParseResult;
-using aspire::http::Request;
-using aspire::http::Response;
-using aspire::http::Router;
-using aspire::util::BufferPool;
+    DpdkEngine(const DpdkEngine&) = delete;
+    DpdkEngine& operator=(const DpdkEngine&) = delete;
+    
+    // Move constructor and assignment
+    DpdkEngine(DpdkEngine&& other) noexcept 
+        : running_(other.running_) {
+        other.running_ = false;
+    }
+    
+    DpdkEngine& operator=(DpdkEngine&& other) noexcept {
+        if (this != &other) {
+            cleanup();
+            running_ = other.running_;
+            other.running_ = false;
+        }
+        return *this;
+    }
 
-class Connection; // forward
+    void run() {
+        running_ = true;
+        
+        // Set up signal handlers
+        signal(SIGINT, signalHandler);
+        signal(SIGTERM, signalHandler);
+        
+        std::cout << "DPDK engine started. Press Ctrl+C to stop." << std::endl;
+        
+        while (running_ && g_running) {
+            processPackets();
+            util::DpdkConnectionPool::instance().cleanup();
+            
+            // Small delay to prevent busy waiting
+            rte_delay_us(100);
+        }
+        
+        std::cout << "DPDK engine stopped." << std::endl;
+    }
 
-class TcpAcceptor {
-    public:
-        static util::Expected<TcpAcceptor> create(IoUringEngine& eng, uint16_t port, int backlog = 128);
+    void stop() { running_ = false; }
 
-        TcpAcceptor(IoUringEngine& eng, uint16_t port, int backlog = 128) : engine_(eng) {
-            util::Fd sock(::socket(AF_INET, SOCK_STREAM, 0));
-            if(!sock.valid()) throw std::runtime_error("socket() failed");
-            listenFd_ = std::move(sock);
+public:
+    DpdkEngine() = default;
 
-            int opt = 1;
-            if(::setsockopt(static_cast<int>(listenFd_), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) { throw std::runtime_error("setsockopt() failed"); }
-#ifdef SO_REUSEPORT
-            if(::setsockopt(static_cast<int>(listenFd_), SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) { throw std::runtime_error("setsockopt(SO_REUSEPORT) failed"); }
-#endif
+private:
 
-            // Set socket buffer sizes from config
-            const auto& config = config::ConfigManager::instance().getSocketConfig();
-            if(::setsockopt(static_cast<int>(listenFd_), SOL_SOCKET, SO_SNDBUF, &config.sendBufferSize, sizeof(config.sendBufferSize)) < 0) {
-                std::cerr << "Warning: setsockopt(SO_SNDBUF) failed" << std::endl;
-            }
-            if(::setsockopt(static_cast<int>(listenFd_), SOL_SOCKET, SO_RCVBUF, &config.recvBufferSize, sizeof(config.recvBufferSize)) < 0) {
-                std::cerr << "Warning: setsockopt(SO_RCVBUF) failed" << std::endl;
-            }
-
-            sockaddr_in addr{};
-            addr.sin_family      = AF_INET;
-            addr.sin_addr.s_addr = htonl(INADDR_ANY);
-            addr.sin_port        = htons(port);
-            if(::bind(static_cast<int>(listenFd_), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) { throw std::runtime_error("bind() failed"); }
-
-            setNonBlocking(static_cast<int>(listenFd_));
-            if(::listen(static_cast<int>(listenFd_), backlog) < 0) { throw std::runtime_error("listen() failed"); }
-            std::cout << "Listening on 0.0.0.0:" << port << "\n";
-            submitAccept();
+    bool initialize() {
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        
+        // Check port availability
+        if (rte_eth_dev_count_avail() == 0) {
+            std::cerr << "No Ethernet ports available" << std::endl;
+            return false;
         }
 
-        ~TcpAcceptor() = default;
-
-        TcpAcceptor(const TcpAcceptor&)                = delete;
-        TcpAcceptor& operator=(const TcpAcceptor&)     = delete;
-        TcpAcceptor(TcpAcceptor&&) noexcept            = default;
-        TcpAcceptor& operator=(TcpAcceptor&&) noexcept = default;
-
-    private:
-        IoUringEngine& engine_;
-        util::Fd       listenFd_{};
-
-        static void setNonBlocking(int fd) {
-            int flags = ::fcntl(fd, F_GETFL, 0);
-            if(flags < 0) flags = 0;
-            ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        // Configure port
+        if (!configurePort(config.portId)) {
+            return false;
         }
 
-        void submitAccept() {
-            auto* sqe = io_uring_get_sqe(engine_.handle());
-            if(!sqe) throw std::runtime_error("io_uring_get_sqe returned null");
-            static thread_local sockaddr_in clientAddr;
-            static thread_local socklen_t   clientLen = sizeof(clientAddr);
-
-            io_uring_prep_accept(sqe, static_cast<int>(listenFd_), reinterpret_cast<sockaddr*>(&clientAddr), &clientLen, 0);
-            auto* ctx      = new IoUringEngine::CompletionContext{&TcpAcceptor::onAccept, this};
-            sqe->user_data = reinterpret_cast<uint64_t>(ctx);
-            io_uring_submit(engine_.handle());
+        // Start port
+        if (rte_eth_dev_start(config.portId) < 0) {
+            std::cerr << "Failed to start port " << config.portId << std::endl;
+            return false;
         }
 
-        static void onAccept(IoUringEngine& eng, struct io_uring_cqe* cqe, void* data);
-};
+        // Enable promiscuous mode for testing
+        rte_eth_promiscuous_enable(config.portId);
 
-inline util::Expected<transport::TcpAcceptor> transport::TcpAcceptor::create(IoUringEngine& eng, uint16_t port, int backlog) {
-    try {
-        return TcpAcceptor(eng, port, backlog);
-    } catch(const std::exception& ex) { return std::string(ex.what()); }
-}
+        std::cout << "DPDK engine initialized on port " << config.portId << std::endl;
+        return true;
+    }
 
-// Connection Pool for reusing connection objects
-class ConnectionPool {
-    public:
-        static ConnectionPool& instance() {
-            static ConnectionPool inst;
-            return inst;
+    bool configurePort(uint16_t portId) {
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        
+        struct rte_eth_conf portConf = {};
+        portConf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
+        portConf.rx_adv_conf.rss_conf.rss_key = nullptr;
+        portConf.rx_adv_conf.rss_conf.rss_hf = RTE_ETH_RSS_IP | RTE_ETH_RSS_TCP | RTE_ETH_RSS_UDP;
+
+        if (rte_eth_dev_configure(portId, config.nbRxQueues, config.nbTxQueues, &portConf) < 0) {
+            std::cerr << "Failed to configure port " << portId << std::endl;
+            return false;
         }
 
-        Connection* acquire(IoUringEngine& eng, int fd);
-        void        release(Connection* conn);
-
-    private:
-        ConnectionPool() { maxPoolSize_ = config::ConfigManager::instance().getSocketConfig().maxConnectionPoolSize; }
-
-        size_t                  maxPoolSize_{100};
-        std::stack<Connection*> pool_;
-        std::mutex              m_;
-};
-
-class Connection {
-    public:
-        Connection(IoUringEngine& eng, int fd) : engine_(&eng), fd_(fd) {
-            buffer_ = BufferPool::instance().acquire();
-            std::cout << "New connection fd=" << fd_.get() << "\n";
-            submitRead();
-        }
-
-        ~Connection() {
-            // fd_ closes automatically via RAII
-            BufferPool::instance().release(buffer_);
-        }
-
-        void reset(IoUringEngine& eng, int fd) {
-            engine_    = &eng;
-            fd_        = util::Fd(fd);
-            closed_    = false;
-            keepAlive_ = false;
-            incoming_.clear();
-            outgoing_.clear();
-            buffer_ = BufferPool::instance().acquire();
-            std::cout << "Reused connection fd=" << fd_.get() << "\n";
-            submitRead();
-        }
-
-        Connection(const Connection&)            = delete;
-        Connection& operator=(const Connection&) = delete;
-
-    private:
-        IoUringEngine* engine_;
-        util::Fd       fd_{};
-        bool           closed_{false};
-        bool           keepAlive_{false};
-
-        std::string incoming_;
-        std::string outgoing_;
-
-        static constexpr std::size_t kBufferSize = BufferPool::kBufSize;
-        char*                        buffer_{nullptr};
-
-        // Zero-copy response optimization
-        Response::IoVecResponse currentResponse_;
-        size_t                  responseOffset_{0};
-        bool                    sendingResponse_{false};
-
-        void submitRead() {
-            auto* sqe = io_uring_get_sqe(engine_->handle());
-            if(!sqe) {
-                std::cerr << "Failed to get SQE for read" << std::endl;
-                closeConnection();
-                return;
-            }
-            io_uring_prep_recv(sqe, static_cast<int>(fd_), buffer_, kBufferSize, 0);
-            auto* ctx      = new IoUringEngine::CompletionContext{&Connection::onRead, this};
-            sqe->user_data = reinterpret_cast<uint64_t>(ctx);
-            io_uring_submit(engine_->handle());
-        }
-
-        void submitWrite(const void* data, std::size_t len) {
-            auto* sqe = io_uring_get_sqe(engine_->handle());
-            if(!sqe) {
-                std::cerr << "Failed to get SQE for write" << std::endl;
-                closeConnection();
-                return;
-            }
-            io_uring_prep_send(sqe, static_cast<int>(fd_), data, static_cast<unsigned int>(len), 0);
-            auto* ctx      = new IoUringEngine::CompletionContext{&Connection::onWrite, this};
-            sqe->user_data = reinterpret_cast<uint64_t>(ctx);
-            io_uring_submit(engine_->handle());
-        }
-
-        void submitWritev(const std::vector<struct iovec>& iovecs) {
-            auto* sqe = io_uring_get_sqe(engine_->handle());
-            if(!sqe) {
-                std::cerr << "Failed to get SQE for writev" << std::endl;
-                closeConnection();
-                return;
-            }
-            io_uring_prep_writev(sqe, static_cast<int>(fd_), iovecs.data(), static_cast<unsigned int>(iovecs.size()), 0);
-            auto* ctx      = new IoUringEngine::CompletionContext{&Connection::onWrite, this};
-            sqe->user_data = reinterpret_cast<uint64_t>(ctx);
-            io_uring_submit(engine_->handle());
-        }
-
-        void closeConnection() {
-            if(!closed_) {
-                closed_ = true;
-                fd_.reset();
-                std::cout << "Closed connection fd=" << fd_.get() << "\n";
-                ConnectionPool::instance().release(this);
+        // Setup RX queues
+        for (uint16_t q = 0; q < config.nbRxQueues; q++) {
+            if (rte_eth_rx_queue_setup(portId, q, config.nbRxDesc, 
+                                      rte_eth_dev_socket_id(portId), nullptr, 
+                                      util::DpdkBufferPool::instance().getMbufPool()) < 0) {
+                std::cerr << "Failed to setup RX queue " << q << std::endl;
+                return false;
             }
         }
 
-        void sendResponse(const Response& resp) {
-            currentResponse_ = resp.toIoVec();
-            responseOffset_  = 0;
-            sendingResponse_ = true;
-
-            if(!currentResponse_.iovecs.empty()) { submitWritev(currentResponse_.iovecs); }
+        // Setup TX queues
+        for (uint16_t q = 0; q < config.nbTxQueues; q++) {
+            if (rte_eth_tx_queue_setup(portId, q, config.nbTxDesc, 
+                                      rte_eth_dev_socket_id(portId), nullptr) < 0) {
+                std::cerr << "Failed to setup TX queue " << q << std::endl;
+                return false;
+            }
         }
 
-        static void onRead(IoUringEngine& eng, struct io_uring_cqe* cqe, void* data) {
-            (void)eng;
-            auto* conn = static_cast<Connection*>(data);
-            if(cqe->res <= 0) {
-                conn->closeConnection();
-                return;
-            }
-            std::size_t bytes = cqe->res;
-            conn->incoming_.append(conn->buffer_, bytes);
+        return true;
+    }
 
+    void processPackets() {
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        struct rte_mbuf* pkts[32];
+        
+        for (uint16_t q = 0; q < config.nbRxQueues; q++) {
+            uint16_t nbRx = rte_eth_rx_burst(config.portId, q, pkts, 32);
+            
+            for (uint16_t i = 0; i < nbRx; i++) {
+                processPacket(pkts[i]);
+            }
+        }
+    }
+
+    void processPacket(struct rte_mbuf* mbuf) {
+        if (!mbuf) return;
+        
+        struct rte_ether_hdr* ethHdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr*);
+        
+        if (rte_be_to_cpu_16(ethHdr->ether_type) != RTE_ETHER_TYPE_IPV4) {
+            rte_pktmbuf_free(mbuf);
+            return;
+        }
+
+        struct rte_ipv4_hdr* ipHdr = (struct rte_ipv4_hdr*)(ethHdr + 1);
+        if (ipHdr->next_proto_id != IPPROTO_TCP) {
+            rte_pktmbuf_free(mbuf);
+            return;
+        }
+
+        struct rte_tcp_hdr* tcpHdr = (struct rte_tcp_hdr*)(ipHdr + 1);
+        uint16_t srcPort = rte_be_to_cpu_16(tcpHdr->src_port);
+        uint16_t dstPort = rte_be_to_cpu_16(tcpHdr->dst_port);
+        
+        // Check if this is HTTP traffic on our port
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        if (dstPort != config.serverPort) {
+            rte_pktmbuf_free(mbuf);
+            return;
+        }
+
+        // Get connection
+        uint32_t srcIp = rte_be_to_cpu_32(ipHdr->src_addr);
+        uint32_t dstIp = rte_be_to_cpu_32(ipHdr->dst_addr);
+        
+        auto* conn = util::DpdkConnectionPool::instance().acquire(srcIp, srcPort, dstIp, dstPort);
+        
+        // Process TCP packet
+        processTcpPacket(conn, mbuf, tcpHdr, ipHdr);
+    }
+
+    void processTcpPacket(util::DpdkConnection* conn, struct rte_mbuf* mbuf, 
+                         struct rte_tcp_hdr* tcpHdr, struct rte_ipv4_hdr* ipHdr) {
+        if (!conn || !mbuf) {
+            rte_pktmbuf_free(mbuf);
+            return;
+        }
+        
+        // Extract payload
+        uint8_t* payload = (uint8_t*)(tcpHdr + 1);
+        uint32_t payloadLen = rte_pktmbuf_data_len(mbuf) - 
+                             sizeof(struct rte_ether_hdr) - 
+                             sizeof(struct rte_ipv4_hdr) - 
+                             (tcpHdr->data_off >> 4) * 4;
+
+        if (payloadLen > 0) {
+            conn->incomingData.append((char*)payload, payloadLen);
+            
+            // Parse HTTP request
             std::size_t consumed = 0;
-            Request     req;
-            auto        result = parseRequest(conn->incoming_, req, consumed);
-
-            if(result == ParseResult::Incomplete) {
-                conn->submitRead();
-                return;
-            }
-            if(result == ParseResult::Error) {
-                conn->closeConnection();
-                return;
-            }
-
-            Response resp;
-
-            // Use middleware system instead of direct handler lookup
-            Router::instance().executeRequest(req, resp);
-
-            // Connection persistence
-            conn->keepAlive_ = !req.connectionClose && req.version == "HTTP/1.1";
-            if(!conn->keepAlive_) {
-                resp.headers[ "Connection" ] = "close";
-            } else {
-                resp.headers[ "Connection" ] = "keep-alive";
-            }
-
-            // Use zero-copy response
-            conn->sendResponse(resp);
-            conn->incoming_.erase(0, consumed);
-        }
-
-        static void onWrite(IoUringEngine& eng, struct io_uring_cqe* cqe, void* data) {
-            (void)eng;
-            auto* conn = static_cast<Connection*>(data);
-            if(cqe->res < 0) {
-                conn->closeConnection();
-                return;
-            }
-
-            if(conn->sendingResponse_) {
-                // Handle partial writes for zero-copy response
-                size_t written = cqe->res;
-                conn->responseOffset_ += written;
-
-                if(conn->responseOffset_ < conn->currentResponse_.iovecs.size()) {
-                    // Continue sending remaining iovecs
-                    std::vector<struct iovec> remaining(conn->currentResponse_.iovecs.begin() + conn->responseOffset_, conn->currentResponse_.iovecs.end());
-                    conn->submitWritev(remaining);
-                } else {
-                    conn->sendingResponse_ = false;
-                    conn->currentResponse_.clear();
-
-                    if(conn->keepAlive_) {
-                        conn->submitRead();
-                    } else {
-                        conn->closeConnection();
-                    }
-                }
-            } else {
-                if(conn->keepAlive_) {
-                    conn->submitRead();
-                } else {
-                    conn->closeConnection();
+            http::Request req;
+            auto result = http::parseRequest(conn->incomingData, req, consumed);
+            
+            if (result == http::ParseResult::Complete) {
+                try {
+                    http::Response resp;
+                    http::Router::instance().executeRequest(req, resp);
+                    
+                    // Send response
+                    std::string responseStr = resp.serialize();
+                    conn->outgoingData = responseStr;
+                    conn->keepAlive = !req.connectionClose && req.version == "HTTP/1.1";
+                    
+                    // Send response using DPDK TX
+                    sendResponse(conn, responseStr, ipHdr, tcpHdr);
+                } catch (const std::exception& e) {
+                    std::cerr << "Error processing HTTP request: " << e.what() << std::endl;
                 }
             }
+            
+            if (result == http::ParseResult::Complete) {
+                conn->incomingData.erase(0, consumed);
+            }
         }
+        
+        rte_pktmbuf_free(mbuf);
+    }
+
+    void sendResponse(util::DpdkConnection* conn [[maybe_unused]], const std::string& response, 
+                     struct rte_ipv4_hdr* ipHdr, struct rte_tcp_hdr* tcpHdr) {
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        
+        // Create response packet
+        struct rte_mbuf* respMbuf = rte_pktmbuf_alloc(util::DpdkBufferPool::instance().getMbufPool());
+        if (!respMbuf) {
+            std::cerr << "Failed to allocate mbuf for response" << std::endl;
+            return;
+        }
+
+        // Set up packet headers
+        struct rte_ether_hdr* ethHdr = rte_pktmbuf_mtod(respMbuf, struct rte_ether_hdr*);
+        struct rte_ipv4_hdr* respIpHdr = (struct rte_ipv4_hdr*)(ethHdr + 1);
+        struct rte_tcp_hdr* respTcpHdr = (struct rte_tcp_hdr*)(respIpHdr + 1);
+        uint8_t* payload = (uint8_t*)(respTcpHdr + 1);
+
+        // Copy response data
+        size_t responseLen = std::min(response.size(), (size_t)(RTE_MBUF_DEFAULT_BUF_SIZE - 
+                                                              sizeof(struct rte_ether_hdr) - 
+                                                              sizeof(struct rte_ipv4_hdr) - 
+                                                              sizeof(struct rte_tcp_hdr)));
+        memcpy(payload, response.data(), responseLen);
+
+        // Set up Ethernet header (swap src/dst)
+        memcpy(ethHdr->dst_addr.addr_bytes, ethHdr->src_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
+        memcpy(ethHdr->src_addr.addr_bytes, ethHdr->dst_addr.addr_bytes, RTE_ETHER_ADDR_LEN);
+        ethHdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+
+        // Set up IP header (swap src/dst)
+        respIpHdr->version_ihl = 0x45;
+        respIpHdr->type_of_service = 0;
+        respIpHdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) + 
+                                                   sizeof(struct rte_tcp_hdr) + responseLen);
+        respIpHdr->packet_id = 0;
+        respIpHdr->fragment_offset = 0;
+        respIpHdr->time_to_live = 64;
+        respIpHdr->next_proto_id = IPPROTO_TCP;
+        respIpHdr->hdr_checksum = 0;
+        respIpHdr->src_addr = ipHdr->dst_addr;
+        respIpHdr->dst_addr = ipHdr->src_addr;
+
+        // Set up TCP header (swap src/dst ports)
+        respTcpHdr->src_port = tcpHdr->dst_port;
+        respTcpHdr->dst_port = tcpHdr->src_port;
+        respTcpHdr->sent_seq = tcpHdr->recv_ack;
+        respTcpHdr->recv_ack = rte_cpu_to_be_32(rte_be_to_cpu_32(tcpHdr->sent_seq) + 1);
+        respTcpHdr->data_off = 0x50; // 5 words
+        respTcpHdr->tcp_flags = RTE_TCP_ACK_FLAG | RTE_TCP_PSH_FLAG;
+        respTcpHdr->rx_win = rte_cpu_to_be_16(65535);
+        respTcpHdr->tcp_urp = 0;
+
+        // Set packet length
+        respMbuf->data_len = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + 
+                             sizeof(struct rte_tcp_hdr) + responseLen;
+        respMbuf->pkt_len = respMbuf->data_len;
+
+        // Send packet
+        uint16_t nbTx = rte_eth_tx_burst(config.portId, 0, &respMbuf, 1);
+        if (nbTx == 0) {
+            rte_pktmbuf_free(respMbuf);
+        }
+    }
+
+    void cleanup() {
+        const auto& config = config::ConfigManager::instance().getDpdkConfig();
+        rte_eth_dev_stop(config.portId);
+        rte_eth_dev_close(config.portId);
+    }
+
+    bool running_{false};
 };
 
-// ConnectionPool implementation
-inline Connection* ConnectionPool::acquire(IoUringEngine& eng, int fd) {
-    std::lock_guard<std::mutex> lock(m_);
-    if(!pool_.empty()) {
-        Connection* conn = pool_.top();
-        pool_.pop();
-        conn->reset(eng, fd);
-        return conn;
-    }
-    return new Connection(eng, fd);
-}
-
-inline void ConnectionPool::release(Connection* conn) {
-    if(!conn) return;
-    std::lock_guard<std::mutex> lock(m_);
-    if(pool_.size() < maxPoolSize_) {
-        pool_.push(conn);
-    } else {
-        delete conn;
-    }
-}
-
-inline void TcpAcceptor::onAccept(IoUringEngine& eng, struct io_uring_cqe* cqe, void* data) {
-    (void)eng;
-    auto* self     = static_cast<TcpAcceptor*>(data);
-    int   clientFd = cqe->res;
-    if(clientFd < 0) {
-        self->submitAccept();
-        return;
-    }
-    TcpAcceptor::setNonBlocking(clientFd);
-
-    // Apply socket optimizations from config
-    const auto& config = config::ConfigManager::instance().getSocketConfig();
-    int         opt    = 1;
-
-    // TCP_NODELAY for low latency
-    if(config.tcpNodelay) {
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) < 0) { std::cerr << "Warning: setsockopt(TCP_NODELAY) failed" << std::endl; }
-    }
-
-    // TCP_QUICKACK for faster ACKs
-    if(config.tcpQuickAck) {
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_QUICKACK, &opt, sizeof(opt)) < 0) { std::cerr << "Warning: setsockopt(TCP_QUICKACK) failed" << std::endl; }
-    }
-
-    // TCP_CORK for better throughput (disable for HTTP)
-    if(config.tcpCork) {
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_CORK, &opt, sizeof(opt)) < 0) { std::cerr << "Warning: setsockopt(TCP_CORK) failed" << std::endl; }
-    } else {
-        opt = 0;
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_CORK, &opt, sizeof(opt)) < 0) { std::cerr << "Warning: setsockopt(TCP_CORK) failed" << std::endl; }
-    }
-
-    // Set keep-alive with configurable settings
-    if(config.tcpKeepAlive) {
-        opt = 1;
-        if(::setsockopt(clientFd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) < 0) { std::cerr << "Warning: setsockopt(SO_KEEPALIVE) failed" << std::endl; }
-
-        // Optimize keep-alive parameters
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_KEEPIDLE, &config.keepAliveTime, sizeof(config.keepAliveTime)) < 0) { std::cerr << "Warning: setsockopt(TCP_KEEPIDLE) failed" << std::endl; }
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_KEEPINTVL, &config.keepAliveInterval, sizeof(config.keepAliveInterval)) < 0) {
-            std::cerr << "Warning: setsockopt(TCP_KEEPINTVL) failed" << std::endl;
-        }
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_KEEPCNT, &config.keepAliveProbes, sizeof(config.keepAliveProbes)) < 0) { std::cerr << "Warning: setsockopt(TCP_KEEPCNT) failed" << std::endl; }
-    }
-
-    // Set buffer sizes from config
-    if(::setsockopt(clientFd, SOL_SOCKET, SO_SNDBUF, &config.sendBufferSize, sizeof(config.sendBufferSize)) < 0) { std::cerr << "Warning: setsockopt(SO_SNDBUF) failed for client" << std::endl; }
-    if(::setsockopt(clientFd, SOL_SOCKET, SO_RCVBUF, &config.recvBufferSize, sizeof(config.recvBufferSize)) < 0) { std::cerr << "Warning: setsockopt(SO_RCVBUF) failed for client" << std::endl; }
-
-    // Set TCP window scaling for better performance
-    if(config.tcpWindowClamp) {
-        opt = 1;
-        if(::setsockopt(clientFd, IPPROTO_TCP, TCP_WINDOW_CLAMP, &opt, sizeof(opt)) < 0) { std::cerr << "Warning: setsockopt(TCP_WINDOW_CLAMP) failed" << std::endl; }
-    }
-
-    std::cout << "Accepted connection fd=" << clientFd << "\n";
-    ConnectionPool::instance().acquire(self->engine_, clientFd);
-    self->submitAccept();
-}
-
-} // namespace transport
+} // namespace dpdk
 
 } // namespace aspire
 
 // --------------------------- main ---------------------------------------
-int main() {
+int main(int argc, char* argv[]) {
     using namespace aspire;
+    
     try {
+        // Initialize DPDK EAL
+        int ret = rte_eal_init(argc, argv);
+        if (ret < 0) {
+            std::cerr << "Failed to initialize DPDK EAL" << std::endl;
+            return 1;
+        }
+
         // Configure server settings
         auto& config = config::ConfigManager::instance();
+        
+        // Set DPDK configuration
+        config.setHighPerformance();
+        
+        auto& dpdkConfig = config.getDpdkConfig();
+        
+        // Customize DPDK settings
+        dpdkConfig.portId = 0;  // Use first available port
+        dpdkConfig.serverPort = 4556;
+        dpdkConfig.nbRxQueues = 2;  // Reduced for single socket
+        dpdkConfig.nbTxQueues = 2;  // Reduced for single socket
+        dpdkConfig.nbRxDesc = 512;  // Reduced for memory efficiency
+        dpdkConfig.nbTxDesc = 512;  // Reduced for memory efficiency
+        dpdkConfig.mbufPoolSize = 4096;  // Reduced for memory efficiency
+        dpdkConfig.mbufCacheSize = 128;  // Reduced for memory efficiency
+        dpdkConfig.tcpMaxConnections = 5000;  // Reduced for memory efficiency
+        dpdkConfig.tcpTimeout = 30;
 
-        // ===== CONFIGURATION EXAMPLES =====
-        // Choose one of these preset configurations:
+        // Check if we have any ports available
+        if (rte_eth_dev_count_avail() == 0) {
+            std::cerr << "No DPDK ports available. Make sure you have:" << std::endl;
+            std::cerr << "1. DPDK drivers loaded (e.g., vfio-pci)" << std::endl;
+            std::cerr << "2. Huge pages configured" << std::endl;
+            std::cerr << "3. Network interfaces bound to DPDK" << std::endl;
+            std::cerr << "4. Running with proper EAL arguments" << std::endl;
+            return 1;
+        }
 
-        // 1. High Performance (default) - balanced for most use cases
-        // config.setHighPerformance();
+        std::cout << "Available DPDK ports: " << rte_eth_dev_count_avail() << std::endl;
 
-        // 2. Low Latency - optimized for real-time applications
-        config.setLowLatency();
-
-        // 3. High Throughput - optimized for bulk data transfer
-        // config.setHighThroughput();
-
-        // 4. Conservative - minimal resource usage
-        // config.setConservative();
-
-        // ===== CUSTOM CONFIGURATION =====
-        // Or customize individual settings:
-        auto& socketConfig = config.getSocketConfig();
-
-        // TCP Optimizations
-        // socketConfig.tcpNodelay = true;        // Enable TCP_NODELAY for low
-        // latency socketConfig.tcpQuickAck = true;       // Enable TCP_QUICKACK
-        // for faster ACKs socketConfig.tcpCork = false;          // Disable
-        // TCP_CORK (recommended for HTTP) socketConfig.tcpKeepAlive = true; //
-        // Enable keep-alive socketConfig.tcpWindowClamp = true;    // Enable
-        // TCP window scaling
-
-        // Keep-alive Parameters
-        // socketConfig.keepAliveTime = 30;       // Idle time before first
-        // probe (seconds) socketConfig.keepAliveInterval = 5;    // Interval
-        // between probes (seconds) socketConfig.keepAliveProbes = 3;      //
-        // Number of probes before giving up
-
-        // Buffer Sizes
-        // socketConfig.sendBufferSize = 256 * 1024;  // Send buffer size
-        // (bytes) socketConfig.recvBufferSize = 256 * 1024;  // Receive buffer
-        // size (bytes)
-
-        // Pool Settings
-        // socketConfig.maxConnectionPoolSize = 100;   // Max connections in
-        // pool socketConfig.maxBufferPoolSize = 1000;     // Max buffers in
-        // pool
-
-        // Server Settings
-        // socketConfig.port = 8080;                   // Server port
-        // socketConfig.backlog = 128;                 // Connection backlog
-        // socketConfig.queueDepth = 1024;             // io_uring queue depth
-        // socketConfig.threads = 0;                   // Number of threads (0 =
-        // auto-detect)
-
-        // ===== END CONFIGURATION =====
-
+        // Initialize HTTP router
         auto& router = http::Router::instance();
 
-        // ===== MIDDLEWARE EXAMPLES =====
-
-        // Global middleware - applied to all requests
+        // Add middleware
         router.use([](http::Context& ctx, std::function<void()> next) {
-            std::cout << "Global middleware: " << ctx.req.method << " " << ctx.req.path << std::endl;
-
-            // Add request timestamp
-            ctx.setData("timestamp", std::chrono::system_clock::now());
-
-            // Continue to next middleware
+            std::cout << "DPDK Global middleware: " << ctx.req.method << " " << ctx.req.path << std::endl;
             next();
         });
 
-        // Logging middleware
-        router.use([](http::Context& ctx [[maybe_unused]], std::function<void()> next) {
-            auto start = std::chrono::high_resolution_clock::now();
-
-            next();
-
-            auto end      = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-            std::cout << "Request completed in " << duration.count() << " microseconds" << std::endl;
-        });
-
-        // Authentication middleware for /api routes
-        router.use("/api", [](http::Context& ctx, std::function<void()> next) {
-            std::string authHeader = ctx.getHeader("authorization");
-
-            if(authHeader.empty() || authHeader != "Bearer valid-token") {
-                ctx.setStatus(401, "Unauthorized");
-                ctx.setBody("Authentication required\n");
-                ctx.setHeader("Content-Type", "text/plain");
-                return; // Don't call next() - stop the chain
-            }
-
-            // Add user info to context
-            ctx.setData("user", std::string("authenticated-user"));
-            next();
-        });
-
-        // Rate limiting middleware for /api routes
-        router.use("/api", [](http::Context& ctx, std::function<void()> next) {
-            // Simple rate limiting - in production you'd use a proper rate
-            // limiter
-            static std::unordered_map<std::string, int> requestCounts;
-            static std::mutex                           rateLimitMutex;
-
-            std::string clientIP = ctx.getHeader("x-forwarded-for");
-            if(clientIP.empty()) { clientIP = "unknown"; }
-
-            {
-                std::lock_guard<std::mutex> lock(rateLimitMutex);
-                if(requestCounts[ clientIP ] > 100) {
-                    ctx.setStatus(429, "Too Many Requests");
-                    ctx.setBody("Rate limit exceeded\n");
-                    ctx.setHeader("Content-Type", "text/plain");
-                    return;
-                }
-                requestCounts[ clientIP ]++;
-            }
-
-            next();
-        });
-
-        // CORS middleware
-        router.use([](http::Context& ctx, std::function<void()> next) {
-            ctx.setHeader("Access-Control-Allow-Origin", "*");
-            ctx.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-            ctx.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
-            if(ctx.req.method == "OPTIONS") {
-                ctx.setStatus(200, "OK");
-                ctx.setBody("");
-                return;
-            }
-
-            next();
-        });
-
-        // Body parsing middleware for JSON
-        router.use([](http::Context& ctx, std::function<void()> next) {
-            std::string contentType = ctx.getHeader("content-type");
-            if(contentType.find("application/json") != std::string::npos && !ctx.req.body.empty()) {
-                // In a real implementation, you'd parse JSON here
-                ctx.setData("parsedBody", ctx.req.body);
-            }
-            next();
-        });
-
-        // ===== ROUTE HANDLERS =====
-
+        // Add routes
         router.registerHandler("/", [](const http::Request&, http::Response& resp) {
-            resp.body                      = "Hello from aspire with middleware!\n";
-            resp.headers[ "Content-Type" ] = "text/plain";
+            resp.body = "Hello from DPDK-powered aspire!\n";
+            resp.headers["Content-Type"] = "text/plain";
         });
 
         router.registerHandler("/echo", [](const http::Request& req, http::Response& resp) {
-            resp.body                      = req.body;
-            resp.headers[ "Content-Type" ] = "text/plain";
+            resp.body = req.body;
+            resp.headers["Content-Type"] = "text/plain";
         });
 
-        // ===== EXPRESS.JS STYLE MIDDLEWARE CHAINS =====
-
-        // Define reusable middleware functions
-        auto loggingMiddleware = [](http::Context& ctx [[maybe_unused]], std::function<void()> next) {
-            std::cout << "Route-specific logging: " << ctx.req.method << " " << ctx.req.path << std::endl;
-            next();
-        };
-
-        auto validationMiddleware = [](http::Context& ctx, std::function<void()> next) {
-            if(ctx.req.method == "POST" && ctx.req.body.empty()) {
-                ctx.setStatus(400, "Bad Request");
-                ctx.setBody("Request body is required\n");
-                ctx.setHeader("Content-Type", "text/plain");
-                return;
-            }
-            next();
-        };
-
-        auto cacheMiddleware = [](http::Context& ctx, std::function<void()> next) {
-            // Simple cache check
-            if(ctx.req.method == "GET") { ctx.setHeader("Cache-Control", "public, max-age=3600"); }
-            next();
-        };
-
-        auto responseTimeMiddleware = [](http::Context& ctx [[maybe_unused]], std::function<void()> next) {
-            auto start = std::chrono::high_resolution_clock::now();
-            next();
-            auto end      = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            ctx.setHeader("X-Response-Time", std::to_string(duration.count()) + "μs");
-        };
-
-        auto userAuthMiddleware = [](http::Context& ctx, std::function<void()> next) {
-            std::string token = ctx.getHeader("x-user-token");
-            if(token.empty()) {
-                ctx.setStatus(401, "Unauthorized");
-                ctx.setBody("User token required\n");
-                ctx.setHeader("Content-Type", "text/plain");
-                return;
-            }
-            ctx.setData("userToken", token);
-            next();
-        };
-
-        auto adminAuthMiddleware = [](http::Context& ctx, std::function<void()> next) {
-            std::string role = ctx.getHeader("x-user-role");
-            if(role != "admin") {
-                ctx.setStatus(403, "Forbidden");
-                ctx.setBody("Admin access required\n");
-                ctx.setHeader("Content-Type", "text/plain");
-                return;
-            }
-            ctx.setData("userRole", "admin");
-            next();
-        };
-
-        // Express.js style route with multiple middleware
-        router.registerHandler("/api/users", std::vector<http::Middleware>{loggingMiddleware, cacheMiddleware, responseTimeMiddleware},
-                               [](const http::Request& req [[maybe_unused]], http::Response& resp) {
-                                   resp.body                      = "{\"users\": [\"user1\", \"user2\", \"user3\"]}\n";
-                                   resp.headers[ "Content-Type" ] = "application/json";
-                               });
-
-        // Route with authentication middleware
-        router.registerHandler("/api/admin/users", std::vector<http::Middleware>{loggingMiddleware, userAuthMiddleware, adminAuthMiddleware, responseTimeMiddleware},
-                               [](const http::Request& req [[maybe_unused]], http::Response& resp) {
-                                   resp.body                      = "{\"admin_users\": [\"admin1\", \"admin2\"]}\n";
-                                   resp.headers[ "Content-Type" ] = "application/json";
-                               });
-
-        // Route with validation middleware
-        router.registerHandler("/api/posts", std::vector<http::Middleware>{loggingMiddleware, validationMiddleware, responseTimeMiddleware},
-                               [](const http::Request& req [[maybe_unused]], http::Response& resp) {
-                                   resp.body                      = "{\"posts\": [\"post1\", \"post2\"]}\n";
-                                   resp.headers[ "Content-Type" ] = "application/json";
-                               });
-
-        // Single middleware example
-        router.registerHandler("/api/simple", cacheMiddleware, [](const http::Request& req [[maybe_unused]], http::Response& resp) {
-            resp.body                      = "{\"message\": \"Simple cached response\"}\n";
-            resp.headers[ "Content-Type" ] = "application/json";
+        router.registerHandler("/api/status", [](const http::Request&, http::Response& resp) {
+            resp.body = "{\"status\": \"running\", \"engine\": \"dpdk\"}\n";
+            resp.headers["Content-Type"] = "application/json";
         });
 
-        // API routes with authentication (original style)
-        router.registerHandler("/api/users/:id", [](const http::Request& req, http::Response& resp) {
-            resp.body                      = "{\"user\": {\"id\": \"" + req.path.substr(req.path.find_last_of('/') + 1) + "\"}}\n";
-            resp.headers[ "Content-Type" ] = "application/json";
+        router.registerHandler("/api/stats", [](const http::Request&, http::Response& resp) {
+            resp.body = "{\"connections\": " + 
+                       std::to_string(util::DpdkConnectionPool::instance().getConnectionCount()) + 
+                       ", \"engine\": \"dpdk\"}\n";
+            resp.headers["Content-Type"] = "application/json";
         });
 
-        // Example routes with path parameters
-        router.registerHandler("/users/:id", [ &router ](const http::Request& req, http::Response& resp) {
-            auto        match              = router.findWithParams(req.path);
-            std::string userId             = match.params[ "id" ];
-            resp.body                      = "User ID: " + userId + "\n";
-            resp.headers[ "Content-Type" ] = "text/plain";
-        });
-
-        router.registerHandler("/posts/:id/comments/:commentId", [ &router ](const http::Request& req, http::Response& resp) {
-            auto        match              = router.findWithParams(req.path);
-            std::string postId             = match.params[ "id" ];
-            std::string commentId          = match.params[ "commentId" ];
-            resp.body                      = "Post ID: " + postId + ", Comment ID: " + commentId + "\n";
-            resp.headers[ "Content-Type" ] = "text/plain";
-        });
-
-        // Get configuration values
-        int          port    = socketConfig.port;
-        unsigned int threads = socketConfig.threads;
-        if(threads == 0) threads = std::thread::hardware_concurrency();
-        if(threads == 0) threads = 4;
-
-        std::vector<std::thread> workers;
-        workers.reserve(threads);
-
-        for(unsigned int i = 0; i < threads; ++i) {
-            workers.emplace_back([ port ]() {
-                auto engExp = aspire::engine::IoUringEngine::create(config::ConfigManager::instance().getSocketConfig().queueDepth);
-                if(!engExp.ok()) {
-                    std::cerr << "Engine init failed: " << engExp.error() << "\n";
-                    return;
-                }
-                auto engine = engExp.take();
-
-                auto accExp = aspire::transport::TcpAcceptor::create(engine, port, config::ConfigManager::instance().getSocketConfig().backlog);
-                if(!accExp.ok()) {
-                    std::cerr << "Acceptor init failed: " << accExp.error() << "\n";
-                    return;
-                }
-                auto acceptor = accExp.take();
-
-                engine.run();
-            });
+        // Create and run DPDK engine
+        auto engineExp = dpdk::DpdkEngine::create();
+        if (!engineExp.ok()) {
+            std::cerr << "Failed to create DPDK engine: " << engineExp.error() << std::endl;
+            return 1;
         }
 
-        std::cout << "Server started on port " << port << " with " << threads << " threads.\n";
-        std::cout << "Configuration: TCP_NODELAY=" << (socketConfig.tcpNodelay ? "enabled" : "disabled") << ", TCP_QUICKACK=" << (socketConfig.tcpQuickAck ? "enabled" : "disabled")
-                  << ", Buffer sizes: " << socketConfig.sendBufferSize / 1024 << "KB\n";
+        auto engine = engineExp.take();
+        
+        std::cout << "DPDK HTTP server started on port " << dpdkConfig.serverPort << std::endl;
+        std::cout << "Configuration: RX queues=" << dpdkConfig.nbRxQueues 
+                  << ", TX queues=" << dpdkConfig.nbTxQueues 
+                  << ", Buffer pool size=" << dpdkConfig.mbufPoolSize << std::endl;
+        std::cout << "Server is ready to handle HTTP requests..." << std::endl;
 
-        for(auto& t : workers) t.join();
-    } catch(const std::exception& ex) {
-        std::cerr << "Error: " << ex.what() << '\n';
+        engine.run();
+
+    } catch (const std::exception& ex) {
+        std::cerr << "Error: " << ex.what() << std::endl;
         return 1;
     }
+
     return 0;
-}
+} 

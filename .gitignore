@@ -1,4 +1,4 @@
-aspire_*
-aspire
 *.lock*
 doc/
+aspire_dpdk
+aspire_server
