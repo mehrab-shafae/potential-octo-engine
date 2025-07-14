@@ -1,4 +1,54 @@
-*.lock*
-doc/
+# فایل‌های بیلد
+build/
+*.o
+*.so
+*.a
 aspire_dpdk
-aspire_server
+aspire_dpdk.exe
+
+# فایل‌های CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# فایل‌های لاگ
+*.log
+logs/
+
+# فایل‌های موقت
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# فایل‌های IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# فایل‌های تست
+test_*
+*_test.cpp
+*_test.h
+
+# فایل‌های کانفیگ
+*.config
+config_*.cpp
+low_power_config.cpp
+medium_power_config.cpp
+high_power_config.cpp
+test_config.cpp
+
+# فایل‌های Docker
+.dockerignore
+
+# فایل‌های سیستم
+*.pid
+*.lock
+
+# فایل‌های DPDK
+*.map
+*.dump

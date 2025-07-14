@@ -823,8 +823,8 @@ public:
             processPackets();
             util::DpdkConnectionPool::instance().cleanup();
             
-            // Small delay to prevent busy waiting
-            rte_delay_us(100);
+            // Longer delay to prevent busy waiting
+            rte_delay_us(1000); // 1ms delay
         }
         
         std::cout << "DPDK engine stopped." << std::endl;
@@ -846,6 +846,13 @@ private:
             return false;
         }
 
+        // Wait for port to be ready
+        int retry = 0;
+        while (rte_eth_dev_count_avail() == 0 && retry < 10) {
+            rte_delay_us(100000); // 100ms
+            retry++;
+        }
+
         // Configure port
         if (!configurePort(config.portId)) {
             return false;
@@ -857,8 +864,21 @@ private:
             return false;
         }
 
+        // Wait for port to be ready
+        retry = 0;
+        while (rte_eth_dev_socket_id(config.portId) < 0 && retry < 50) {
+            rte_delay_us(100000); // 100ms
+            retry++;
+        }
+
         // Enable promiscuous mode for testing
         rte_eth_promiscuous_enable(config.portId);
+
+        // For TAP device, we need to set up the interface
+        if (config.portId == 0) {
+            // Wait a bit for TAP to be ready
+            rte_delay_us(500000); // 500ms
+        }
 
         std::cout << "DPDK engine initialized on port " << config.portId << std::endl;
         return true;
@@ -902,6 +922,11 @@ private:
     void processPackets() {
         const auto& config = config::ConfigManager::instance().getDpdkConfig();
         struct rte_mbuf* pkts[32];
+        
+        // Check if port is ready
+        if (rte_eth_dev_socket_id(config.portId) < 0) {
+            return;
+        }
         
         for (uint16_t q = 0; q < config.nbRxQueues; q++) {
             uint16_t nbRx = rte_eth_rx_burst(config.portId, q, pkts, 32);
